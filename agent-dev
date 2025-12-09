@@ -35,7 +35,7 @@
 set -euo pipefail
 
 # Configuration
-AI_HOME="$HOME/aihome"
+AI_HOME="${AI_HOME:-$HOME/aihome}"
 REPO_DIR="$(pwd)"
 
 # Overlay directories for repository isolation (using full path to avoid conflicts)

@@ -1,0 +1,546 @@
+#!/usr/bin/expect -f
+# Comprehensive test suite for merge-overlay script using expect
+
+# Configuration
+set timeout 10
+set test_dir "/tmp/merge-overlay-test-[clock seconds]"
+set repo_dir "$test_dir/repo"
+set overlay_upper "$test_dir/overlay"
+
+# Colors for output
+set GREEN "\033\[0;32m"
+set RED "\033\[0;31m"
+set YELLOW "\033\[0;33m"
+set NC "\033\[0m"
+
+# Test counters
+set tests_passed 0
+set tests_failed 0
+set test_total 0
+
+# Logging procedures
+proc log_info {msg} {
+    puts "\n==> $msg"
+}
+
+proc log_success {msg} {
+    global GREEN NC tests_passed
+    puts "${GREEN}✓${NC} $msg"
+    incr tests_passed
+}
+
+proc log_failure {msg} {
+    global RED NC tests_failed
+    puts "${RED}✗${NC} $msg"
+    incr tests_failed
+}
+
+proc start_test {name} {
+    global test_total
+    incr test_total
+    puts "\n----------------------------------------"
+    puts "Test $test_total: $name"
+    puts "----------------------------------------"
+}
+
+# Setup test environment
+proc setup_test_env {} {
+    global test_dir repo_dir overlay_upper
+
+    log_info "Setting up test environment at $test_dir"
+
+    # Create directories
+    exec mkdir -p $repo_dir
+    exec mkdir -p $overlay_upper
+
+    # Initialize git repo (merge-overlay checks for .git)
+    exec sh -c "cd $repo_dir && git init >/dev/null 2>&1"
+
+    # Create some base files in repo
+    exec sh -c "echo 'original content' > $repo_dir/file1.txt"
+    exec sh -c "echo 'base content' > $repo_dir/file2.txt"
+
+    log_success "Test environment created"
+}
+
+# Cleanup test environment
+proc cleanup_test_env {} {
+    global test_dir
+
+    log_info "Cleaning up test environment"
+    exec rm -rf $test_dir
+    log_success "Cleanup complete"
+}
+
+# Helper to create a file in overlay
+proc create_overlay_file {filename content} {
+    global overlay_upper
+    exec sh -c "echo '$content' > $overlay_upper/$filename"
+}
+
+# Helper to create a whiteout file (deletion marker)
+proc create_whiteout {filename} {
+    global overlay_upper
+    set dir [file dirname $filename]
+    set base [file tail $filename]
+    if {$dir eq "."} {
+        exec touch "$overlay_upper/.wh.$base"
+    } else {
+        exec mkdir -p "$overlay_upper/$dir"
+        exec touch "$overlay_upper/$dir/.wh.$base"
+    }
+}
+
+# Test 1: Accept a new file (y)
+proc test_accept_new_file {} {
+    global repo_dir overlay_upper
+
+    start_test "Accept new file"
+    create_overlay_file "newfile.txt" "new content"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    expect {
+        -re {NEW.*newfile\.txt} {
+            send "y\r"
+            expect {
+                "✓ Accepted" {
+                    expect eof
+
+                    # Verify file was copied to repo
+                    if {[file exists "$repo_dir/newfile.txt"]} {
+                        log_success "New file accepted and copied to repo"
+                    } else {
+                        log_failure "File not found in repo after accepting"
+                    }
+
+                    # Verify file removed from overlay
+                    if {![file exists "$overlay_upper/newfile.txt"]} {
+                        log_success "File removed from overlay after accepting"
+                    } else {
+                        log_failure "File still in overlay after accepting"
+                    }
+                }
+                timeout {
+                    log_failure "Timeout waiting for acceptance confirmation"
+                }
+            }
+        }
+        timeout {
+            log_failure "Timeout waiting for file prompt"
+        }
+    }
+}
+
+# Test 2: Discard a new file (r)
+proc test_discard_new_file {} {
+    global repo_dir overlay_upper
+
+    start_test "Discard new file"
+    create_overlay_file "discard-me.txt" "discard content"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    expect {
+        -re {NEW.*discard-me\.txt} {
+            send "r\r"
+            expect {
+                "✓ Discarded" {
+                    expect eof
+
+                    # Verify file was NOT copied to repo
+                    if {![file exists "$repo_dir/discard-me.txt"]} {
+                        log_success "File correctly not copied to repo"
+                    } else {
+                        log_failure "File incorrectly copied to repo"
+                    }
+
+                    # Verify file removed from overlay
+                    if {![file exists "$overlay_upper/discard-me.txt"]} {
+                        log_success "File removed from overlay after discarding"
+                    } else {
+                        log_failure "File still in overlay after discarding"
+                    }
+                }
+                timeout {
+                    log_failure "Timeout waiting for discard confirmation"
+                }
+            }
+        }
+        timeout {
+            log_failure "Timeout waiting for file prompt"
+        }
+    }
+}
+
+# Test 3: Skip a file (n)
+proc test_skip_file {} {
+    global repo_dir overlay_upper
+
+    start_test "Skip file (leave in overlay)"
+    create_overlay_file "skip-me.txt" "skip content"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    expect {
+        -re {NEW.*skip-me\.txt} {
+            send "n\r"
+            expect {
+                "○ Skipped" {
+                    expect eof
+
+                    # Verify file was NOT copied to repo
+                    if {![file exists "$repo_dir/skip-me.txt"]} {
+                        log_success "File correctly not copied to repo"
+                    } else {
+                        log_failure "File incorrectly copied to repo"
+                    }
+
+                    # Verify file still in overlay
+                    if {[file exists "$overlay_upper/skip-me.txt"]} {
+                        log_success "File kept in overlay after skipping"
+                    } else {
+                        log_failure "File removed from overlay after skipping"
+                    }
+                }
+                timeout {
+                    log_failure "Timeout waiting for skip confirmation"
+                }
+            }
+        }
+        timeout {
+            log_failure "Timeout waiting for file prompt"
+        }
+    }
+
+    # Cleanup for next test
+    exec rm -f "$overlay_upper/skip-me.txt"
+}
+
+# Test 4: Accept modified file
+proc test_accept_modified_file {} {
+    global repo_dir overlay_upper
+
+    start_test "Accept modified file"
+    create_overlay_file "file1.txt" "modified content"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    expect {
+        -re {MODIFIED.*file1\.txt} {
+            send "y\r"
+            expect {
+                "✓ Accepted" {
+                    expect eof
+
+                    # Verify file was updated in repo
+                    set content [exec cat "$repo_dir/file1.txt"]
+                    if {$content eq "modified content"} {
+                        log_success "Modified file updated in repo"
+                    } else {
+                        log_failure "File content not updated (got: $content)"
+                    }
+                }
+                timeout {
+                    log_failure "Timeout waiting for acceptance"
+                }
+            }
+        }
+        timeout {
+            log_failure "Timeout waiting for modified file prompt"
+        }
+    }
+}
+
+# Test 5: Show diff (d) then accept
+proc test_show_diff {} {
+    global repo_dir overlay_upper
+
+    start_test "Show diff then accept"
+    create_overlay_file "file2.txt" "changed content"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    expect {
+        -re {MODIFIED.*file2\.txt} {
+            send "d\r"
+            expect {
+                -re {Diff: .*/file2.txt} {
+                    # Diff shown, now accept
+                    expect {
+                        -re {Action.*\?} {
+                            send "y\r"
+                            expect {
+                                "✓ Accepted" {
+                                    log_success "Diff shown and file accepted"
+                                    expect eof
+                                }
+                                timeout {
+                                    log_failure "Timeout after accepting"
+                                }
+                            }
+                        }
+                        timeout {
+                            log_failure "Timeout waiting for action prompt after diff"
+                        }
+                    }
+                }
+                timeout {
+                    log_failure "Timeout waiting for diff output"
+                }
+            }
+        }
+        timeout {
+            log_failure "Timeout waiting for file prompt"
+        }
+    }
+}
+
+# Test 6: Accept deletion (whiteout file)
+proc test_accept_deletion {} {
+    global repo_dir overlay_upper
+
+    start_test "Accept file deletion"
+
+    # Ensure file1.txt exists in repo before testing deletion
+    exec sh -c "echo 'to be deleted' > $repo_dir/file1.txt"
+
+    create_whiteout "file1.txt"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    expect {
+        -re {DELETED.*file1\.txt} {
+            send "y\r"
+            expect {
+                "✓ Deleted from repository" {
+                    expect eof
+
+                    # Verify file was deleted from repo
+                    if {![file exists "$repo_dir/file1.txt"]} {
+                        log_success "File deleted from repository"
+                    } else {
+                        log_failure "File still exists in repository"
+                    }
+                }
+                timeout {
+                    log_failure "Timeout waiting for deletion confirmation"
+                }
+            }
+        }
+        timeout {
+            log_failure "Timeout waiting for deletion prompt"
+        }
+    }
+}
+
+# Test 7: Accept all remaining (Y)
+proc test_accept_all {} {
+    global repo_dir overlay_upper
+
+    start_test "Accept all remaining files"
+    create_overlay_file "all1.txt" "content 1"
+    create_overlay_file "all2.txt" "content 2"
+    create_overlay_file "all3.txt" "content 3"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    expect {
+        -re {NEW.*all1\.txt} {
+            send "Y\r"
+            expect {
+                "→ Accepting all remaining files..." {
+                    expect eof
+
+                    # Verify all files were copied
+                    set all_copied 1
+                    foreach f {all1.txt all2.txt all3.txt} {
+                        if {![file exists "$repo_dir/$f"]} {
+                            set all_copied 0
+                        }
+                    }
+
+                    if {$all_copied} {
+                        log_success "All files accepted and copied to repo"
+                    } else {
+                        log_failure "Not all files were copied"
+                    }
+
+                    # Verify all removed from overlay
+                    set all_removed 1
+                    foreach f {all1.txt all2.txt all3.txt} {
+                        if {[file exists "$overlay_upper/$f"]} {
+                            set all_removed 0
+                        }
+                    }
+
+                    if {$all_removed} {
+                        log_success "All files removed from overlay"
+                    } else {
+                        log_failure "Some files still in overlay"
+                    }
+                }
+                timeout {
+                    log_failure "Timeout waiting for accept all confirmation"
+                }
+            }
+        }
+        timeout {
+            log_failure "Timeout waiting for first file"
+        }
+    }
+}
+
+# Test 8: Discard all remaining (R)
+proc test_discard_all {} {
+    global repo_dir overlay_upper
+
+    start_test "Discard all remaining files"
+    create_overlay_file "discard1.txt" "content 1"
+    create_overlay_file "discard2.txt" "content 2"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    expect {
+        -re {NEW.*discard1\.txt} {
+            send "R\r"
+            expect {
+                "→ Discarding all remaining files..." {
+                    expect eof
+
+                    # Verify files were NOT copied
+                    set none_copied 1
+                    foreach f {discard1.txt discard2.txt} {
+                        if {[file exists "$repo_dir/$f"]} {
+                            set none_copied 0
+                        }
+                    }
+
+                    if {$none_copied} {
+                        log_success "All files correctly not copied"
+                    } else {
+                        log_failure "Some files were incorrectly copied"
+                    }
+
+                    # Verify all removed from overlay
+                    set all_removed 1
+                    foreach f {discard1.txt discard2.txt} {
+                        if {[file exists "$overlay_upper/$f"]} {
+                            set all_removed 0
+                        }
+                    }
+
+                    if {$all_removed} {
+                        log_success "All files removed from overlay"
+                    } else {
+                        log_failure "Some files still in overlay"
+                    }
+                }
+                timeout {
+                    log_failure "Timeout waiting for discard all confirmation"
+                }
+            }
+        }
+        timeout {
+            log_failure "Timeout waiting for first file"
+        }
+    }
+}
+
+# Test 9: Empty overlay
+proc test_empty_overlay {} {
+    global repo_dir overlay_upper
+
+    start_test "Handle empty overlay gracefully"
+
+    # Clear overlay to ensure it's truly empty
+    exec rm -rf "$overlay_upper"
+    exec mkdir -p "$overlay_upper"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    expect {
+        "✓ No changes in overlay - nothing to merge" {
+            log_success "Empty overlay handled correctly"
+            expect eof
+        }
+        timeout {
+            log_failure "Timeout or wrong message for empty overlay"
+        }
+    }
+}
+
+# Test 10: Invalid arguments
+proc test_invalid_arguments {} {
+    start_test "Reject invalid arguments"
+
+    spawn ./merge-overlay
+
+    expect {
+        "Usage:" {
+            log_success "Usage message shown for missing arguments"
+            expect eof
+        }
+        timeout {
+            log_failure "No usage message for missing arguments"
+        }
+    }
+}
+
+# Helper to clear overlay between tests
+proc clear_overlay {} {
+    global overlay_upper
+    exec sh -c "rm -rf $overlay_upper/* 2>/dev/null || true"
+}
+
+# Main test execution
+proc run_all_tests {} {
+    global tests_passed tests_failed test_total GREEN RED NC
+
+    puts "\n========================================"
+    puts "  Merge-Overlay Test Suite"
+    puts "========================================"
+
+    setup_test_env
+
+    # Run all tests with cleanup between each
+    test_accept_new_file
+    clear_overlay
+    test_discard_new_file
+    clear_overlay
+    test_skip_file
+    clear_overlay
+    test_accept_modified_file
+    clear_overlay
+    test_show_diff
+    clear_overlay
+    test_accept_deletion
+    clear_overlay
+    test_accept_all
+    clear_overlay
+    test_discard_all
+    clear_overlay
+    test_empty_overlay
+    test_invalid_arguments
+
+    cleanup_test_env
+
+    # Summary
+    puts "\n========================================"
+    puts "  Test Summary"
+    puts "========================================"
+    puts "Total tests: $test_total"
+    puts "${GREEN}Passed: $tests_passed${NC}"
+    puts "${RED}Failed: $tests_failed${NC}"
+    puts ""
+
+    if {$tests_failed > 0} {
+        exit 1
+    } else {
+        puts "All tests passed!"
+        exit 0
+    }
+}
+
+# Run the test suite
+run_all_tests

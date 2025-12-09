@@ -62,7 +62,7 @@ get_file_status() {
   local repo_file="$2"
 
   # Check if it's a whiteout file (deletion marker in overlayfs)
-  if [[ "$(basename "$overlay_file")" =~ ^\\.wh\\. ]]; then
+  if [[ "$(basename "$overlay_file")" =~ ^\.wh\. ]]; then
     echo "deleted"
     return
   fi
