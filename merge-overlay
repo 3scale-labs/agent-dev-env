@@ -26,6 +26,23 @@ fi
 REPO_DIR="$1"
 OVERLAY_UPPER="$2"
 
+# Patterns to auto-discard (created by sandbox, should never be merged)
+IGNORE_PATTERNS=(
+  ".claude/*"           # Claude settings created by bwrap bind
+)
+
+# Check if a path matches any ignore pattern
+should_ignore() {
+  local path="$1"
+  for pattern in "${IGNORE_PATTERNS[@]}"; do
+    # Use case for reliable glob pattern matching
+    case "$path" in
+      $pattern) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # Validate directories
 if [[ ! -d "$REPO_DIR" ]]; then
   echo "Error: Repository directory does not exist: $REPO_DIR"
@@ -281,12 +298,37 @@ echo ""
 # Find all files in overlay (including hidden files, excluding . and ..)
 # We need to handle whiteout files (both .wh. prefix and char devices 0/0) and regular files
 FILES=()
+IGNORED=()
 while IFS= read -r -d '' file; do
   rel_path="${file#$OVERLAY_UPPER/}"
-  FILES+=("$rel_path")
+  if should_ignore "$rel_path"; then
+    IGNORED+=("$rel_path")
+    # Auto-discard ignored files
+    rm -f "$file"
+  else
+    FILES+=("$rel_path")
+  fi
 done < <(find "$OVERLAY_UPPER" \( -type f -o -type c \) -print0 | sort -z)
 
+# Report ignored files
+if [[ ${#IGNORED[@]} -gt 0 ]]; then
+  echo "Auto-discarded ${#IGNORED[@]} ignored file(s):"
+  for f in "${IGNORED[@]}"; do
+    echo "  - $f"
+  done
+  echo ""
+fi
+
 TOTAL=${#FILES[@]}
+
+# Exit if no files remain after filtering
+if [[ $TOTAL -eq 0 ]]; then
+  # Clean up empty directories
+  find "$OVERLAY_UPPER" -type d -empty -delete 2>/dev/null || true
+  echo "✓ No changes in overlay - nothing to merge"
+  exit 0
+fi
+
 echo "Found $TOTAL file(s) to review"
 echo ""
 
