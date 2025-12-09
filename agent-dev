@@ -1,0 +1,307 @@
+#!/bin/bash
+# claude-code-isolated: Secure bubblewrap wrapper for running commands in isolation
+#
+# Provides isolated environment with:
+# - ~/aihome mounted at your actual $HOME path (mostly writable)
+# - Current repo mounted at its original absolute path (read-write)
+# - All paths preserved to avoid hardcoded path issues
+# - No access to sensitive files (~/.ssh, ~/.aws, ~/.gnupg, etc.)
+#
+# Setup:
+#   1. Create isolated home: mkdir -p ~/aihome
+#   2. Login to Claude in the sandbox:
+#      cd /path/to/your/repo
+#      claude-code-isolated bash
+#      claude   # Follow login prompts
+#      exit
+#   3. (Optional) Disable auto-updates in isolated home:
+#      mkdir -p ~/aihome/.claude
+#      echo '{"autoUpdates": false}' > ~/aihome/.claude/settings.local.json
+#
+# Usage:
+#   cd /path/to/your/repo
+#   claude-code-isolated           # Runs claude
+#   claude-code-isolated bash      # Inspect the environment
+#   claude-code-isolated vim file  # Run any command
+
+set -euo pipefail
+
+# Configuration
+AI_HOME="$HOME/aihome"
+REPO_DIR="$(pwd)"
+
+# ===== Protected paths in repository (read-only or tmpfs/devnull if non-existent) =====
+PROTECTED_REPO_FILES=(
+  ".git/config"
+  ".git/info/exclude"  # Prevent sneaking ignore rules (not visible in git status)
+  ".gitconfig"
+  ".gitmodules"
+  ".ripgreprc"
+  ".project"
+  ".classpath"
+)
+
+PROTECTED_REPO_DIRS=(
+  ".git/hooks"
+  ".vscode"
+  ".idea"
+  ".settings"
+  ".claude/commands"
+  ".claude/agents"
+)
+
+# ===== Protected paths in agent home (read-only overlays on writable home) =====
+PROTECTED_AGENT_HOME_FILES=(
+  ".gitconfig"      # Safe config created during setup
+  ".bashrc"
+  ".bash_profile"
+  ".zshrc"
+  ".zprofile"
+  ".profile"
+  ".npmrc"
+  ".gemrc"
+  ".inputrc"
+)
+
+PROTECTED_AGENT_HOME_DIRS=(
+  ".ssh"            # If accidentally created, keep read-only
+  ".bashrc.d"       # Bash config scripts sourced by .bashrc
+  ".zshrc.d"        # Zsh config scripts (if used)
+)
+
+# ===== Whitelisted paths from real home (read-only mounts) =====
+WHITELISTED_HOME_FILES=(
+  # Add files from real home that should be readable (if any)
+)
+
+WHITELISTED_HOME_DIRS=(
+  ".asdf"
+  ".npm"
+  ".bundle"
+  ".gem"
+  ".cargo"
+  ".rustup"
+  ".local"
+  "bin"
+)
+
+# Validate environment
+if [[ ! -d "$AI_HOME" ]]; then
+  echo "⚠️  AI home directory does not exist: $AI_HOME"
+  echo ""
+  echo "This directory will be used as Claude Code's isolated home."
+  echo "Create it with: mkdir -p $AI_HOME"
+  echo ""
+  exit 1
+fi
+
+if [[ ! -d .git ]]; then
+  echo "Error: Must run from a git repository root"
+  exit 1
+fi
+
+# Update Claude before entering sandbox (via npm, not trusting claude update)
+echo "🔄 Checking for Claude updates via npm..."
+npm update -g @anthropics/claude-code 2>&1 | grep -E "(changed|up to date)" || true
+echo ""
+
+# Prepare Claude settings: create permissive default in temp file
+CLAUDE_SETTINGS_TEMP=$(mktemp)
+
+cat > "$CLAUDE_SETTINGS_TEMP" << 'EOF'
+{
+  "autoApprove": {
+    "bash": ["*"],
+    "read": ["*"],
+    "write": ["*"],
+    "edit": ["*"]
+  },
+  "autoUpdates": false
+}
+EOF
+
+# Cleanup function: remove mount point artifacts and temp files
+cleanup_protected_files() {
+  # Remove zero-length protected files (mount point artifacts)
+  for file in "${PROTECTED_REPO_FILES[@]}"; do
+    if [[ ! -s "$REPO_DIR/$file" ]]; then
+      rm -f "$REPO_DIR/$file"
+    fi
+  done
+
+  # Remove temp Claude settings
+  rm -f "$CLAUDE_SETTINGS_TEMP"
+}
+
+# Register cleanup on exit (handles normal exit, errors, and interrupts)
+trap cleanup_protected_files EXIT
+
+# Resolve DNS configuration (handles symlinks like /etc/resolv.conf -> /run/systemd/resolve/stub-resolv.conf)
+RESOLV_CONF_TARGET=$(readlink -f /etc/resolv.conf)
+
+# Build bwrap arguments for protected repo paths
+BWRAP_REPO_PROTECTIONS=()
+
+# Protected files: ro-bind if exists, bind /dev/null if not (prevents creation)
+for file in "${PROTECTED_REPO_FILES[@]}"; do
+  if [[ -f "$REPO_DIR/$file" ]]; then
+    BWRAP_REPO_PROTECTIONS+=(--ro-bind "$REPO_DIR/$file" "$REPO_DIR/$file")
+  else
+    # Bind /dev/null to prevent malicious file creation (creates empty mount point)
+    BWRAP_REPO_PROTECTIONS+=(--ro-bind /dev/null "$REPO_DIR/$file")
+  fi
+done
+
+# Protected directories: ro-bind if exists, tmpfs if not (prevents creation)
+for dir in "${PROTECTED_REPO_DIRS[@]}"; do
+  if [[ -d "$REPO_DIR/$dir" ]]; then
+    BWRAP_REPO_PROTECTIONS+=(--ro-bind "$REPO_DIR/$dir" "$REPO_DIR/$dir")
+  else
+    # Mount empty tmpfs to prevent malicious creation
+    BWRAP_REPO_PROTECTIONS+=(--tmpfs "$REPO_DIR/$dir")
+  fi
+done
+
+# Build bwrap arguments for whitelisted real home paths
+BWRAP_HOME_WHITELIST=()
+
+# Whitelisted files from real home: ro-bind if exists, /dev/null if not
+for file in "${WHITELISTED_HOME_FILES[@]}"; do
+  if [[ -f "$HOME/$file" ]]; then
+    BWRAP_HOME_WHITELIST+=(--ro-bind "$HOME/$file" "$HOME/$file")
+  else
+    # Prevent creation in agent home
+    BWRAP_HOME_WHITELIST+=(--ro-bind /dev/null "$HOME/$file")
+  fi
+done
+
+# Whitelisted directories from real home: ro-bind if exists, tmpfs if not
+for dir in "${WHITELISTED_HOME_DIRS[@]}"; do
+  if [[ -d "$HOME/$dir" ]]; then
+    BWRAP_HOME_WHITELIST+=(--ro-bind "$HOME/$dir" "$HOME/$dir")
+  else
+    # Prevent persistent creation in agent home (writes go to RAM)
+    BWRAP_HOME_WHITELIST+=(--tmpfs "$HOME/$dir")
+  fi
+done
+
+# Build bwrap arguments for protected agent home paths
+BWRAP_AGENT_HOME_PROTECTIONS=()
+
+# Protected files in agent home: ro-bind if exists, /dev/null if not
+for file in "${PROTECTED_AGENT_HOME_FILES[@]}"; do
+  if [[ -f "$AI_HOME/$file" ]]; then
+    BWRAP_AGENT_HOME_PROTECTIONS+=(--ro-bind "$AI_HOME/$file" "$HOME/$file")
+  else
+    # Prevent malicious creation for persistence attacks
+    BWRAP_AGENT_HOME_PROTECTIONS+=(--ro-bind /dev/null "$HOME/$file")
+  fi
+done
+
+# Protected directories in agent home: ro-bind if exists, tmpfs if not
+for dir in "${PROTECTED_AGENT_HOME_DIRS[@]}"; do
+  if [[ -d "$AI_HOME/$dir" ]]; then
+    BWRAP_AGENT_HOME_PROTECTIONS+=(--ro-bind "$AI_HOME/$dir" "$HOME/$dir")
+  else
+    # Prevent persistent creation for persistence attacks (writes go to RAM)
+    BWRAP_AGENT_HOME_PROTECTIONS+=(--tmpfs "$HOME/$dir")
+  fi
+done
+
+echo "🔒 Starting Claude Code in isolated environment..."
+echo "   Home: $HOME → $AI_HOME (isolated, mostly writable)"
+echo "   Repo: $REPO_DIR (read-write, with protections)"
+echo ""
+
+# Count protections by category
+REPO_PROTECTED=$((${#PROTECTED_REPO_FILES[@]} + ${#PROTECTED_REPO_DIRS[@]}))
+AGENT_HOME_PROTECTED=$((${#BWRAP_AGENT_HOME_PROTECTIONS[@]}))
+WHITELIST_COUNT=$((${#BWRAP_HOME_WHITELIST[@]}))
+
+echo "🛡️  Protection summary:"
+echo "   • Repo: $REPO_PROTECTED paths (ro-bind, tmpfs, or /dev/null)"
+echo "   • Agent home: $AGENT_HOME_PROTECTED config files (read-only)"
+echo "   • Real home: $WHITELIST_COUNT dev tools (read-only)"
+echo ""
+echo "💡 Non-existent paths use tmpfs/devnull to prevent creation"
+echo "💡 To restore: rm -rf $AI_HOME && re-run this script"
+echo ""
+
+bwrap \
+  `# ===== System directories (read-only) =====` \
+  --ro-bind /usr /usr \
+  --ro-bind /etc /etc \
+  --ro-bind-try /opt /opt \
+  --ro-bind-try /nix /nix \
+  \
+  `# Symlinks for compatibility` \
+  --symlink /usr/lib /lib \
+  --symlink /usr/lib64 /lib64 \
+  --symlink /usr/bin /bin \
+  --symlink /usr/sbin /sbin \
+  \
+  `# ===== Pseudo-filesystems =====` \
+  --proc /proc \
+  --dev /dev \
+  --tmpfs /run \
+  --tmpfs /sys \
+  \
+  `# ===== DNS resolution =====` \
+  `# Mount the actual resolv.conf file at its real location (handles /etc/resolv.conf -> /run/systemd/... symlinks)` \
+  --ro-bind "$RESOLV_CONF_TARGET" "$RESOLV_CONF_TARGET" \
+  \
+  `# ===== Temporary directories (isolated, writable) =====` \
+  --tmpfs /tmp \
+  --tmpfs /var/tmp \
+  \
+  `# ===== AI Home mounted at real home path (WRITABLE) =====` \
+  `# This ensures hardcoded paths to $HOME work correctly` \
+  `# Agent can write anywhere here - easy to restore if corrupted` \
+  --bind "$AI_HOME" "$HOME" \
+  \
+  `# ===== Protected agent home paths (read-only overlays) =====` \
+  `# Config files created during setup - prevent tampering/persistence attacks` \
+  "${BWRAP_AGENT_HOME_PROTECTIONS[@]}" \
+  \
+  `# ===== Whitelisted real home paths (read-only overlays) =====` \
+  `# Dev tools and files from real home mounted read-only` \
+  "${BWRAP_HOME_WHITELIST[@]}" \
+  \
+  `# ===== Current repository at original path (read-write) =====` \
+  `# If under $HOME, this overlays the aihome mount at this specific location` \
+  --bind "$REPO_DIR" "$REPO_DIR" \
+  --chdir "$REPO_DIR" \
+  \
+  `# ===== Protected repo paths (read-only or tmpfs) =====` \
+  `# Files: ro-bind if exists, ignored if not` \
+  `# Dirs: ro-bind if exists, tmpfs if not (prevents malicious creation)` \
+  "${BWRAP_REPO_PROTECTIONS[@]}" \
+  \
+  `# ===== Claude settings override (permissive, non-persistent) =====` \
+  `# Writable temp file overlays repo settings - changes don't persist to host` \
+  --bind "$CLAUDE_SETTINGS_TEMP" "$REPO_DIR/.claude/settings.local.json" \
+  \
+  `# ===== Isolation and security =====` \
+  --unshare-all \
+  --share-net \
+  --die-with-parent \
+  --new-session \
+  \
+  `# ===== Environment variables =====` \
+  `# --setenv HOME "$HOME"` \
+  `# --setenv USER "$(whoami)"` \
+  `# --setenv LOGNAME "$(whoami)"` \
+  `# --setenv SHELL "/bin/bash"` \
+  `# --setenv TERM "${TERM:-xterm-256color}"` \
+  `# --setenv PATH "$HOME/.asdf/shims:$HOME/.asdf/bin:$HOME/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"` \
+  `# --setenv ASDF_DIR "${HOME}/.asdf"` \
+  `# --setenv ASDF_DATA_DIR "${HOME}/.asdf"` \
+  \
+  `# Clean environment - remove potentially dangerous vars` \
+  --unsetenv DBUS_SESSION_BUS_ADDRESS \
+  --unsetenv XDG_RUNTIME_DIR \
+  --unsetenv SSH_AUTH_SOCK \
+  --unsetenv GPG_AGENT_INFO \
+  \
+  `# ===== Execute command (defaults to claude) =====` \
+  "${@:-claude}"
