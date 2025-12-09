@@ -128,7 +128,7 @@ cat > "$CLAUDE_SETTINGS_TEMP" << 'EOF'
 {
   "permissions": {
      "allow": [
-       "Bash(*:*)",
+       "Bash",
        "WebSearch"
      ]
   }
