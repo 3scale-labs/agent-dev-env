@@ -1,3 +1,7 @@
+# Agent Dev Environment
+
+[![Tests](https://github.com/3scale-labs/agent-dev-env/actions/workflows/tests.yml/badge.svg)](https://github.com/3scale-labs/agent-dev-env/actions/workflows/tests.yml)
+
 # Goal
 The goal is to easily start your coding agent within a secure sandbox environment that closely resembles your actual development environment and safely merge the results back.
 
@@ -13,6 +17,7 @@ There are existing attempts to sandbox agent processes, the most serious I find 
 
 # Usage
 
+* requires Bubblewrap 0.11+ for the overlayfs support
 * add the script(s) to your PATH
 * `mkdir -p ~/aihome`
 * agent-dev bash
@@ -30,4 +35,19 @@ Now you can just call the script from within a git working tree and feel the fal
 * also `asdf`, `npm` and other directories from user's real home are monuted read-only inside the sandbox home so that you have access to these installations without ability to install, remove and modify them
 * note: *this means you need to install all necessary libraries from the host*
 
-TODO: what is possibly unsafe - e.g. gitignored files, careful when merging (if I implement this)
+The biggest concern I see is merging the changes after exiting the agent. One has to be careful with merging files that are a potential treat outside the sanbox.
+
+A lesser but potentially important in some environments is the cocern that a malware may set roots into the sandbox and use local resources or network access for malicious purposes. On signs of weird behavior, I'd suggest investigating and wiping the agent home dir to start over.
+
+## Running Tests
+
+```bash
+# Install expect if not already installed
+sudo apt install expect  # Debian/Ubuntu
+# or
+sudo dnf install expect  # Fedora/RHEL
+
+# Run all tests
+./tests/test-merge-overlay.expect  # Test the merge workflow
+./tests/test-agent-dev.expect      # Test isolation and sandbox behavior
+```

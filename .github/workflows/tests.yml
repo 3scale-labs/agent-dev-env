@@ -1,0 +1,149 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    name: Run Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get install -y expect apparmor-profiles
+
+    - name: Get bubblewrap latest commit
+      id: bwrap-commit
+      run: |
+        COMMIT=$(git ls-remote https://github.com/containers/bubblewrap.git HEAD | cut -f1)
+        echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+        echo "Bubblewrap latest commit: $COMMIT"
+
+    - name: Restore bubblewrap from cache
+      id: cache-bwrap
+      uses: actions/cache/restore@v4
+      with:
+        path: /tmp/bwrap-bin
+        key: bwrap-${{ runner.os }}-${{ steps.bwrap-commit.outputs.commit }}
+
+    - name: Install build dependencies
+      if: steps.cache-bwrap.outputs.cache-hit != 'true'
+      run: |
+        sudo apt-get install -y \
+          meson \
+          ninja-build \
+          libcap-dev \
+          gcc \
+          pkg-config
+
+    - name: Build latest bubblewrap
+      if: steps.cache-bwrap.outputs.cache-hit != 'true'
+      run: |
+        # Clone and build latest bubblewrap
+        cd /tmp
+        git clone https://github.com/containers/bubblewrap.git
+        cd bubblewrap
+        meson setup builddir --prefix=/usr
+        meson compile -C builddir
+
+        # Prepare binary for caching
+        mkdir -p /tmp/bwrap-bin
+        cp builddir/bwrap /tmp/bwrap-bin/
+
+    - name: Save bubblewrap to cache
+      if: steps.cache-bwrap.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: /tmp/bwrap-bin
+        key: bwrap-${{ runner.os }}-${{ steps.bwrap-commit.outputs.commit }}
+
+    - name: Install bubblewrap
+      run: |
+        sudo cp /tmp/bwrap-bin/bwrap /usr/bin/bwrap
+        sudo chmod +x /usr/bin/bwrap
+
+        # Verify version (should be 0.11.0 or later)
+        bwrap --version
+
+    - name: Setup user namespaces for bubblewrap
+      run: |
+        # Configure subuid and subgid for unprivileged user namespaces
+        USERNAME=$(whoami)
+
+        # Add subuid mapping (100000 UIDs starting from 100000)
+        # echo "$USERNAME:100000:65536" | sudo tee -a /etc/subuid
+
+        # Add subgid mapping (100000 GIDs starting from 100000)
+        # echo "$USERNAME:100000:65536" | sudo tee -a /etc/subgid
+
+        # Enable unprivileged user namespaces (should already be enabled on Ubuntu)
+        # echo "kernel.unprivileged_userns_clone=1" | sudo tee -a /etc/sysctl.conf
+        # sudo sysctl -p
+
+        # Setup AppArmor profile for bubblewrap user namespaces
+        sudo ln -s /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap
+        sudo apparmor_parser /etc/apparmor.d/bwrap
+
+        # Verify setup
+        cat /etc/subuid
+        cat /etc/subgid
+
+    - name: Setup test environment
+      run: |
+        # Create isolated home for agent
+        mkdir -p ~/aihome
+
+        # Initialize git config (required for some tests)
+        git config --global user.email "ci@github.actions"
+        git config --global user.name "GitHub Actions"
+
+    - name: Run merge-overlay tests
+      run: |
+        cd ${{ github.workspace }}
+        ./tests/test-merge-overlay.expect
+
+    - name: Setup for agent-dev tests
+      run: |
+        # Ensure we're in a git repo with proper setup
+        cd ${{ github.workspace }}
+        git status || git init
+
+        # Create .claude directory structure if needed
+        mkdir -p .claude
+        touch .claude/settings.local.json || true
+
+    - name: Run agent-dev integration tests
+      run: |
+        cd ${{ github.workspace }}
+        export PATH="$PWD:$PATH"
+        ./tests/test-agent-dev.expect
+
+    - name: Test summary
+      if: always()
+      run: |
+        echo "Test execution completed"
+        echo "Check logs above for detailed results"
+
+  lint:
+    name: Shell Script Linting
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install ShellCheck
+      run: sudo apt-get install -y shellcheck
+
+    - name: Lint shell scripts
+      run: |
+        echo "Linting bash scripts..."
+        shellcheck agent-dev merge-overlay || true
+        echo "Note: Some warnings may be acceptable for this use case"

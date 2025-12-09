@@ -1,0 +1,510 @@
+#!/usr/bin/expect -f
+# Integration tests for agent-dev script using expect
+
+set timeout 30
+
+# Colors for output
+set GREEN "\033\[0;32m"
+set RED "\033\[0;31m"
+set YELLOW "\033\[0;33m"
+set NC "\033\[0m"
+
+# Test counters
+set tests_passed 0
+set tests_failed 0
+
+proc log_success {msg} {
+    global GREEN NC tests_passed
+    puts "${GREEN}✓${NC} $msg"
+    incr tests_passed
+}
+
+proc log_failure {msg} {
+    global RED NC tests_failed
+    puts "${RED}✗${NC} $msg"
+    incr tests_failed
+}
+
+proc log_info {msg} {
+    puts "\n==> $msg"
+}
+
+proc start_test {name} {
+    puts "\n----------------------------------------"
+    puts "Test: $name"
+    puts "----------------------------------------"
+}
+
+# Use isolated test environment instead of real aihome
+set test_ai_home "/tmp/agent-dev-test-aihome-[clock seconds]"
+set repo_dir [pwd]
+set overlay_base "$test_ai_home/.overlay[exec realpath $repo_dir]"
+set overlay_upper "$overlay_base/upper"
+
+# Set AI_HOME environment variable for all spawned processes
+set env(AI_HOME) $test_ai_home
+
+# Setup test environment
+proc setup_test_environment {} {
+    global test_ai_home env
+
+    log_info "Creating isolated test environment at $test_ai_home"
+    exec mkdir -p $test_ai_home
+
+    log_success "Test environment created"
+    log_info "AI_HOME set to: $env(AI_HOME)"
+}
+
+# Cleanup test environment
+proc cleanup_test_environment {} {
+    global test_ai_home
+
+    log_info "Cleaning up test environment"
+    exec rm -rf $test_ai_home
+    log_success "Test environment cleaned up"
+}
+
+# Check prerequisites
+proc check_prerequisites {} {
+    global repo_dir
+
+    log_info "Checking prerequisites"
+
+    # Check if we're in a git repo
+    if {![file exists "$repo_dir/.git"]} {
+        puts "${RED}Error: Must run from git repository root${NC}"
+        exit 1
+    }
+
+    # Check if agent-dev exists and is executable
+    if {![file executable "./agent-dev"]} {
+        puts "${RED}Error: ./agent-dev not found or not executable${NC}"
+        exit 1
+    }
+
+    log_success "Prerequisites check passed"
+}
+
+# Test 1: Basic environment setup
+proc test_environment_setup {} {
+    global overlay_upper overlay_base
+
+    start_test "Environment setup and overlay creation"
+
+    # Clean overlay if exists
+    exec rm -rf $overlay_upper 2>/dev/null || true
+
+    spawn ./agent-dev bash -c "pwd"
+
+    expect {
+        -re "Starting Claude Code in isolated environment" {
+            log_success "Isolation banner displayed"
+        }
+        timeout {
+            log_failure "Timeout waiting for isolation banner"
+            expect eof
+            catch wait
+            return
+        }
+    }
+
+    expect {
+        -re "Overlay directories:" {
+            log_success "Overlay information displayed"
+        }
+        timeout {
+            log_failure "No overlay information shown"
+            expect eof
+            catch wait
+            return
+        }
+    }
+
+    # Wait for command to complete and merge-overlay to run
+    expect {
+        -re "No changes in overlay" {
+            log_success "Empty overlay detected"
+        }
+        eof {
+            # Process exited
+        }
+        timeout {
+            log_failure "Timeout waiting for completion"
+        }
+    }
+
+    catch wait result
+    log_info "Process exited with: $result"
+
+    # Verify overlay directories were created
+    if {[file exists $overlay_upper]} {
+        log_success "Overlay upper directory created"
+    } else {
+        log_failure "Overlay upper directory not created"
+    }
+}
+
+# Test 2: File creation in overlay
+proc test_file_creation_isolation {} {
+    global repo_dir overlay_upper
+
+    start_test "File creation isolated to overlay"
+
+    set test_file "test-isolation-[clock seconds].txt"
+    set test_content "This is test content"
+
+    spawn ./agent-dev bash -c "echo '$test_content' > $test_file && cat $test_file"
+
+    expect {
+        $test_content {
+            log_success "File created and readable in sandbox"
+        }
+        timeout {
+            log_failure "Timeout or file not created in sandbox"
+            expect eof
+            catch wait
+            return
+        }
+    }
+
+    # Handle merge-overlay interaction - discard the test file
+    expect {
+        -re "NEW.*$test_file" {
+            send "r\r"
+            expect {
+                "✓ Discarded" {
+                    log_success "Test file discarded from overlay"
+                }
+                timeout {
+                    log_failure "Timeout waiting for discard confirmation"
+                }
+            }
+        }
+        -re "No changes in overlay" {
+            log_info "No changes to merge (unexpected)"
+        }
+        eof {
+            # Process exited without merge prompt
+        }
+        timeout {
+            log_failure "Timeout waiting for merge prompt"
+        }
+    }
+
+    catch wait result
+
+    # Check file was in overlay (before we discarded it)
+    # Note: file will be gone after discard, so we can't verify this way
+    # The test passes if merge-overlay detected and handled it
+
+    if {![file exists "$repo_dir/$test_file"]} {
+        log_success "Original repository not modified"
+    } else {
+        log_failure "File leaked to original repository!"
+        exec rm -f "$repo_dir/$test_file"
+    }
+}
+
+# Test 3: Protected directory access
+proc test_protected_directories {} {
+    global repo_dir
+
+    start_test "Protected directories are read-only"
+
+    # Try to modify .git/config (should fail or not persist)
+    spawn ./agent-dev bash -c "echo '# test' >> .git/config 2>&1; echo STATUS:\$?"
+
+    expect {
+        -re "STATUS:(1|2)" {
+            log_success "Write to .git/config blocked (permission denied)"
+        }
+        "STATUS:0" {
+            log_failure "Write to .git/config succeeded (should be blocked)"
+        }
+        timeout {
+            log_failure "Timeout testing .git/config protection"
+            expect eof
+            catch wait
+            return
+        }
+    }
+
+    # Handle merge-overlay (should be empty)
+    expect {
+        -re "No changes in overlay" {
+            log_success "No changes to merge (expected)"
+        }
+        eof {
+            # Process exited
+        }
+        timeout {
+            log_failure "Timeout waiting for completion"
+        }
+    }
+
+    catch wait
+
+    # Verify .git/config wasn't actually modified
+    if {[catch {exec grep -c "# test" "$repo_dir/.git/config"} result] || $result eq "0"} {
+        log_success ".git/config remained unmodified"
+    } else {
+        log_failure ".git/config was modified!"
+    }
+}
+
+# Test 4: Whitelisted directory access (read-only)
+proc test_whitelisted_access {} {
+    start_test "Whitelisted directories accessible read-only"
+
+    # Check if we can read from whitelisted dirs (e.g., .asdf if it exists)
+    spawn ./agent-dev bash -c {
+        if [ -d ~/.asdf ]; then
+            ls ~/.asdf >/dev/null 2>&1 && echo "READ_OK"
+        else
+            echo "NO_ASDF"
+        fi
+    }
+
+    expect {
+        "READ_OK" {
+            log_success "Whitelisted directory readable"
+        }
+        "NO_ASDF" {
+            log_info "Skipping test (.asdf not present)"
+        }
+        timeout {
+            log_failure "Timeout testing whitelisted directory access"
+            expect eof
+            catch wait
+            return
+        }
+    }
+
+    # Handle merge-overlay
+    expect {
+        -re "No changes in overlay" {
+            # Expected
+        }
+        eof {
+            # Process exited
+        }
+        timeout {
+            log_failure "Timeout waiting for completion"
+        }
+    }
+
+    catch wait
+}
+
+# Test 5: Home directory isolation
+proc test_home_isolation {} {
+    global test_ai_home env
+
+    start_test "Home directory mapped to aihome"
+
+    spawn ./agent-dev bash -c {
+        echo "HOME=$HOME"
+        echo "PWD=$PWD"
+        touch ~/test-home-file.txt
+        ls ~/test-home-file.txt
+    }
+
+    expect {
+        -re "test-home-file.txt" {
+            log_success "Files can be created in isolated home"
+        }
+        timeout {
+            log_failure "Timeout testing home directory"
+            expect eof
+            catch wait
+            return
+        }
+    }
+
+    # Handle merge-overlay (should be empty since file is in home, not repo)
+    expect {
+        -re "No changes in overlay" {
+            log_success "No repo changes (file was in home)"
+        }
+        eof {
+            # Process exited
+        }
+        timeout {
+            log_failure "Timeout waiting for completion"
+        }
+    }
+
+    catch wait
+
+    # Verify file is in test aihome, not real home
+    if {[file exists "$test_ai_home/test-home-file.txt"]} {
+        log_success "File created in isolated test aihome"
+        exec rm -f "$test_ai_home/test-home-file.txt"
+    } else {
+        log_failure "File not found in test aihome"
+    }
+
+    if {![file exists "$env(HOME)/test-home-file.txt"]} {
+        log_success "Real home directory not modified"
+    } else {
+        log_failure "File leaked to real home!"
+        exec rm -f "$env(HOME)/test-home-file.txt"
+    }
+}
+
+# Test 6: Working directory preservation
+proc test_working_directory {} {
+    global repo_dir
+
+    start_test "Working directory preserved in sandbox"
+
+    spawn ./agent-dev bash -c "pwd"
+
+    expect {
+        $repo_dir {
+            log_success "Working directory correctly set to repo"
+        }
+        timeout {
+            log_failure "Timeout checking working directory"
+            expect eof
+            catch wait
+            return
+        }
+    }
+
+    # Handle merge-overlay
+    expect {
+        -re "No changes in overlay" {
+            # Expected
+        }
+        eof {
+            # Process exited
+        }
+        timeout {
+            log_failure "Timeout waiting for completion"
+        }
+    }
+
+    catch wait
+}
+
+# Test 7: Network access
+proc test_network_access {} {
+    start_test "Network access available in sandbox"
+
+    spawn ./agent-dev bash -c "ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 && echo 'PING_OK' || echo 'PING_FAIL'"
+
+    expect {
+        "PING_OK" {
+            log_success "Network access works"
+        }
+        "PING_FAIL" {
+            log_info "Network unavailable (may be expected in some environments)"
+        }
+        timeout {
+            log_failure "Timeout testing network access"
+            expect eof
+            catch wait
+            return
+        }
+    }
+
+    # Handle merge-overlay
+    expect {
+        -re "No changes in overlay" {
+            # Expected
+        }
+        eof {
+            # Process exited
+        }
+        timeout {
+            log_failure "Timeout waiting for completion"
+        }
+    }
+
+    catch wait
+}
+
+# Test 8: Overlay cleanup on empty session
+proc test_empty_overlay_handling {} {
+    global overlay_upper
+
+    start_test "Empty overlay handled correctly"
+
+    # Clear overlay
+    exec rm -rf $overlay_upper
+    exec mkdir -p $overlay_upper
+
+    # Run agent-dev with no changes
+    spawn ./agent-dev bash -c "echo 'No changes made'"
+
+    expect {
+        "No changes made" {
+            log_success "Command executed"
+        }
+        timeout {
+            log_failure "Timeout waiting for command"
+            expect eof
+            catch wait
+            return
+        }
+    }
+
+    expect {
+        "✓ No changes in overlay - nothing to merge" {
+            log_success "Empty overlay detected correctly"
+        }
+        eof {
+            # Process exited
+        }
+        timeout {
+            log_failure "Timeout waiting for empty overlay message"
+        }
+    }
+
+    catch wait
+}
+
+# Main execution
+proc run_all_tests {} {
+    global tests_passed tests_failed GREEN RED NC
+
+    puts "\n========================================"
+    puts "  Agent-Dev Integration Test Suite"
+    puts "========================================"
+
+    check_prerequisites
+    setup_test_environment
+
+    test_environment_setup
+    test_file_creation_isolation
+    test_protected_directories
+    test_whitelisted_access
+    test_home_isolation
+    test_working_directory
+    test_network_access
+    test_empty_overlay_handling
+
+    cleanup_test_environment
+
+    # Summary
+    puts "\n========================================"
+    puts "  Test Summary"
+    puts "========================================"
+    set total [expr $tests_passed + $tests_failed]
+    puts "Total assertions: $total"
+    puts "${GREEN}Passed: $tests_passed${NC}"
+    puts "${RED}Failed: $tests_failed${NC}"
+    puts ""
+
+    if {$tests_failed > 0} {
+        puts "Some tests failed!"
+        exit 1
+    } else {
+        puts "All tests passed!"
+        exit 0
+    }
+}
+
+# Run the tests
+run_all_tests
