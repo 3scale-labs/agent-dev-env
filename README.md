@@ -26,6 +26,8 @@ There are existing attempts to sandbox agent processes, the most serious I find 
 
 Now you can just call the script from within a git working tree and feel the false sense of security you came here for.
 
+**WARNING: Do not run multiple agent instances in the same repository simultaneously.** Each repository uses a single shared overlay directory (based on the repository path). Running multiple agents concurrently in the same repo will cause overlayfs conflicts and potential data corruption. You can safely run multiple agents in different repositories at the same time.
+
 # Implementation concerns
 
 * it operates on a selected directory `~/aihome` as the agent's writable home directory
