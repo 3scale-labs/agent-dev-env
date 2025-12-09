@@ -193,9 +193,13 @@ proc test_file_creation_isolation {} {
 
     catch wait result
 
-    # Check file was in overlay (before we discarded it)
-    # Note: file will be gone after discard, so we can't verify this way
-    # The test passes if merge-overlay detected and handled it
+    # Verify overlay is now empty (confirms only one file was created and discarded)
+    set overlay_files [glob -nocomplain -directory $overlay_upper *]
+    if {[llength $overlay_files] == 0} {
+        log_success "Overlay empty after discard (only one file was created)"
+    } else {
+        log_failure "Overlay not empty - unexpected files remain: $overlay_files"
+    }
 
     if {![file exists "$repo_dir/$test_file"]} {
         log_success "Original repository not modified"
@@ -207,7 +211,7 @@ proc test_file_creation_isolation {} {
 
 # Test 3: Protected directory access
 proc test_protected_directories {} {
-    global repo_dir
+    global repo_dir overlay_upper
 
     start_test "Protected directories are read-only"
 
@@ -243,6 +247,14 @@ proc test_protected_directories {} {
     }
 
     catch wait
+
+    # Verify overlay is empty (protected dirs shouldn't create overlay files)
+    set overlay_files [glob -nocomplain -directory $overlay_upper *]
+    if {[llength $overlay_files] == 0} {
+        log_success "Overlay empty (protected directory write blocked)"
+    } else {
+        log_failure "Overlay not empty - unexpected files: $overlay_files"
+    }
 
     # Verify .git/config wasn't actually modified
     if {[catch {exec grep -c "# test" "$repo_dir/.git/config"} result] || $result eq "0"} {
@@ -425,7 +437,179 @@ proc test_network_access {} {
     catch wait
 }
 
-# Test 8: Overlay cleanup on empty session
+# Test 8: Comprehensive multi-file merge workflow
+proc test_multi_file_merge_workflow {} {
+    global repo_dir overlay_upper
+
+    start_test "Multi-file merge: NEW, MODIFIED, DELETED with diff/accept/skip/discard"
+
+    # Pre-create files: one to modify, one to delete
+    set existing_file "to-be-deleted.txt"
+    set modify_file "to-be-modified.txt"
+    exec sh -c "echo 'will be deleted' > $repo_dir/$existing_file"
+    exec sh -c "echo 'original content' > $repo_dir/$modify_file"
+
+    # Create multiple files, modify one, delete one in a single session
+    set timestamp [clock seconds]
+    spawn ./agent-dev bash -c "
+        echo 'content for file1' > merge-test1-$timestamp.txt
+        echo 'content for file2' > merge-test2-$timestamp.txt
+        echo 'content for file3' > merge-test3-$timestamp.txt
+        echo 'modified content' > $modify_file
+        rm $existing_file
+        echo 'Session complete: 3 new, 1 modified, 1 deleted'
+    "
+
+    expect {
+        "Session complete: 3 new, 1 modified, 1 deleted" {
+            log_success "Multiple changes made in sandbox (3 NEW, 1 MODIFIED, 1 DELETED)"
+        }
+        timeout {
+            log_failure "Timeout creating changes in sandbox"
+            expect eof
+            catch wait
+            return
+        }
+    }
+
+    # Verify overlay has changes (3 new files + 1 modified + deletion marker)
+    # Note: Modern overlayfs uses character devices (0/0) for deletions, not .wh. files
+    set overlay_items [glob -nocomplain -directory $overlay_upper *]
+
+    if {[llength $overlay_items] >= 4} {
+        log_success "Overlay contains changes (found [llength $overlay_items] items)"
+    } else {
+        log_failure "Expected at least 4 items in overlay, found [llength $overlay_items]"
+    }
+
+    # Handle all merge-overlay interactions
+    # Use a simpler approach - just respond to each prompt as it comes
+    expect {
+        -re "Found (\\d+) file" {
+            set num_files $expect_out(1,string)
+            log_info "Merge-overlay will process $num_files files"
+        }
+        timeout {
+            log_failure "Timeout waiting for file count"
+        }
+    }
+
+    # Handle each file interactively
+    while {1} {
+        expect {
+            -re "NEW.*merge-test1-$timestamp\\.txt.*Action" {
+                send "d\r"
+                log_success "Requested diff for NEW file 1"
+                exp_continue
+            }
+            -re "File does not exist in repository.*Action" {
+                send "y\r"
+                log_success "Diff warning shown, accepting NEW file 1"
+                exp_continue
+            }
+            -re "✓ Accepted" {
+                exp_continue
+            }
+            -re "NEW.*merge-test2-$timestamp\\.txt.*Action" {
+                send "n\r"
+                log_success "Skipping NEW file 2"
+                exp_continue
+            }
+            -re "○ Skipped" {
+                exp_continue
+            }
+            -re "NEW.*merge-test3-$timestamp\\.txt.*Action" {
+                send "r\r"
+                log_success "Discarding NEW file 3"
+                exp_continue
+            }
+            -re "✓ Discarded" {
+                exp_continue
+            }
+            -re "MODIFIED.*$modify_file.*Action" {
+                send "d\r"
+                log_success "Requested diff for MODIFIED file"
+                exp_continue
+            }
+            -re "Diff:.*$modify_file.*Action" {
+                send "y\r"
+                log_success "Diff shown, accepting MODIFIED file"
+                exp_continue
+            }
+            -re "DELETED.*$existing_file.*Action" {
+                send "y\r"
+                log_success "Accept DELETED file"
+                exp_continue
+            }
+            -re "(File does not exist|already.*deleted).*Action" {
+                send "y\r"
+                log_success "Diff handled, accepting DELETED file"
+                exp_continue
+            }
+            -re "✓ Deleted from repository" {
+                exp_continue
+            }
+            eof {
+                log_success "Merge-overlay completed all files"
+                break
+            }
+            timeout {
+                log_failure "Timeout during merge-overlay interaction"
+                break
+            }
+        }
+    }
+
+    catch wait
+
+    # Verify final state
+    # File 1 should be in repo
+    if {[file exists "$repo_dir/merge-test1-$timestamp.txt"]} {
+        log_success "Accepted NEW file correctly in repository"
+    } else {
+        log_failure "Accepted NEW file not found in repository"
+    }
+
+    # File 2 should still be in overlay
+    if {[file exists "$overlay_upper/merge-test2-$timestamp.txt"]} {
+        log_success "Skipped NEW file correctly remains in overlay"
+    } else {
+        log_failure "Skipped NEW file not found in overlay"
+    }
+
+    # File 3 should not be in repo or overlay
+    if {![file exists "$repo_dir/merge-test3-$timestamp.txt"] && ![file exists "$overlay_upper/merge-test3-$timestamp.txt"]} {
+        log_success "Discarded NEW file correctly removed"
+    } else {
+        log_failure "Discarded NEW file found where it shouldn't be"
+    }
+
+    # Modified file should have new content
+    if {[file exists "$repo_dir/$modify_file"]} {
+        set content [exec cat "$repo_dir/$modify_file"]
+        if {$content eq "modified content"} {
+            log_success "MODIFIED file has updated content in repository"
+        } else {
+            log_failure "MODIFIED file content incorrect: $content"
+        }
+    } else {
+        log_failure "MODIFIED file not found in repository"
+    }
+
+    # Deleted file should not exist in repo
+    if {![file exists "$repo_dir/$existing_file"]} {
+        log_success "DELETED file correctly removed from repository"
+    } else {
+        log_failure "DELETED file still exists in repository"
+    }
+
+    # Cleanup: remove skipped file from overlay and test files from repo
+    exec rm -f "$overlay_upper/merge-test2-$timestamp.txt"
+    exec rm -f "$repo_dir/merge-test1-$timestamp.txt"
+    exec rm -f "$repo_dir/$modify_file"
+}
+
+# Test 9: Overlay cleanup on empty session
 proc test_empty_overlay_handling {} {
     global overlay_upper
 
@@ -483,6 +667,7 @@ proc run_all_tests {} {
     test_home_isolation
     test_working_directory
     test_network_access
+    test_multi_file_merge_workflow
     test_empty_overlay_handling
 
     cleanup_test_environment
