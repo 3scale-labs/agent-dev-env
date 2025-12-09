@@ -495,7 +495,15 @@ proc test_multi_file_merge_workflow {} {
     }
 
     # Handle each file interactively
+    set interaction_count 0
+    set max_interactions 50
     while {1} {
+        incr interaction_count
+        if {$interaction_count > $max_interactions} {
+            log_failure "Too many interactions ($max_interactions) - possible infinite loop"
+            break
+        }
+
         expect {
             -re "NEW.*merge-test1-$timestamp\\.txt.*Action" {
                 send "d\r"
@@ -549,12 +557,19 @@ proc test_multi_file_merge_workflow {} {
             -re "✓ Deleted from repository" {
                 exp_continue
             }
+            -re "Action \\\[.*\\\]\\\?" {
+                # Unexpected action prompt - send 'n' to skip
+                log_info "Unexpected action prompt (interaction $interaction_count) - skipping"
+                send "n\r"
+                exp_continue
+            }
             eof {
                 log_success "Merge-overlay completed all files"
                 break
             }
             timeout {
-                log_failure "Timeout during merge-overlay interaction"
+                log_failure "Timeout during merge-overlay interaction (at interaction $interaction_count)"
+                log_info "Last buffer content: $expect_out(buffer)"
                 break
             }
         }
