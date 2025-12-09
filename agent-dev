@@ -126,13 +126,12 @@ CLAUDE_SETTINGS_TEMP=$(mktemp)
 
 cat > "$CLAUDE_SETTINGS_TEMP" << 'EOF'
 {
-  "autoApprove": {
-    "bash": ["*"],
-    "read": ["*"],
-    "write": ["*"],
-    "edit": ["*"]
-  },
-  "autoUpdates": false
+  "permissions": {
+     "allow": [
+       "Bash(*:*)",
+       "WebSearch"
+     ]
+  }
 }
 EOF
 

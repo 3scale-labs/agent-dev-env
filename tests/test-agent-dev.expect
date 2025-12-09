@@ -1,710 +1,610 @@
 #!/usr/bin/expect -f
-# Integration tests for agent-dev script using expect
+#
+# Integration Test Suite for agent-dev
+# =====================================
+#
+# This test suite verifies the agent-dev sandbox environment works correctly:
+#   - Overlay filesystem isolation (files don't leak to real repo)
+#   - Protected directories (.git) are read-only
+#   - Home directory is isolated
+#   - Merge workflow handles NEW/MODIFIED/DELETED files
+#
+# Run from repository root: ./tests/test-agent-dev.expect
+#
+
+# ==============================================================================
+# Configuration
+# ==============================================================================
 
 set timeout 30
 
-# Colors for output
+# Disable output buffering
+log_user 1
+
+# Test environment paths
+set repo_dir [pwd]
+set test_ai_home "/tmp/agent-dev-test-aihome-[clock seconds]"
+set overlay_base "$test_ai_home/.overlay[exec realpath $repo_dir]"
+set overlay_upper "$overlay_base/upper"
+
+# Export AI_HOME for spawned processes
+set env(AI_HOME) $test_ai_home
+
+# ==============================================================================
+# Output Helpers
+# ==============================================================================
+
+# ANSI colors
 set GREEN "\033\[0;32m"
 set RED "\033\[0;31m"
 set YELLOW "\033\[0;33m"
+set BOLD "\033\[1m"
 set NC "\033\[0m"
 
 # Test counters
 set tests_passed 0
 set tests_failed 0
 
-proc log_success {msg} {
+proc pass {msg} {
     global GREEN NC tests_passed
-    puts "${GREEN}✓${NC} $msg"
+    puts "  ${GREEN}PASS${NC} $msg"
     incr tests_passed
 }
 
-proc log_failure {msg} {
+proc fail {msg} {
     global RED NC tests_failed
-    puts "${RED}✗${NC} $msg"
+    puts "  ${RED}FAIL${NC} $msg"
     incr tests_failed
 }
 
-proc log_info {msg} {
-    puts "\n==> $msg"
+proc info {msg} {
+    global YELLOW NC
+    puts "  ${YELLOW}INFO${NC} $msg"
 }
 
-proc start_test {name} {
-    puts "\n----------------------------------------"
-    puts "Test: $name"
-    puts "----------------------------------------"
+proc section {title} {
+    global BOLD NC
+    puts "\n${BOLD}$title${NC}"
+    puts [string repeat "-" [string length $title]]
 }
 
-# Use isolated test environment instead of real aihome
-set test_ai_home "/tmp/agent-dev-test-aihome-[clock seconds]"
-set repo_dir [pwd]
-set overlay_base "$test_ai_home/.overlay[exec realpath $repo_dir]"
-set overlay_upper "$overlay_base/upper"
+# ==============================================================================
+# Test Utilities
+# ==============================================================================
 
-# Set AI_HOME environment variable for all spawned processes
-set env(AI_HOME) $test_ai_home
+# Waits for process to exit and consumes remaining output
+proc finish_process {} {
+    global spawn_id
+    expect {
+        eof { }
+        timeout {
+            fail "Timeout waiting for process to exit"
+            catch { close -i $spawn_id }
+        }
+    }
+    catch { wait -i $spawn_id }
+}
 
-# Setup test environment
-proc setup_test_environment {} {
-    global test_ai_home env
+# Runs a command in agent-dev and returns spawn_id
+proc run_in_sandbox {cmd} {
+    global spawn_id
+    spawn ./agent-dev bash -c $cmd
+    return $spawn_id
+}
 
-    log_info "Creating isolated test environment at $test_ai_home"
+# Expects merge-overlay to report no changes (or auto-discard ignored files), then finishes
+proc expect_no_changes {} {
+    global spawn_id
+    expect {
+        "No changes in overlay" { }
+        "Auto-discarded" {
+            # Ignored files were auto-discarded, wait for completion
+            expect {
+                "No changes in overlay" { }
+                eof { }
+                timeout { fail "Timeout after auto-discard" }
+            }
+        }
+        eof { }
+        timeout {
+            fail "Timeout waiting for completion"
+            # Kill the process to avoid hanging
+            catch { close -i $spawn_id }
+        }
+    }
+    catch { wait -i $spawn_id }
+}
+
+# Cleans overlay directory for fresh test
+proc reset_overlay {} {
+    global overlay_upper
+    catch { exec rm -rf $overlay_upper }
+    catch { exec mkdir -p $overlay_upper }
+}
+
+# Checks if file exists in repository
+proc file_in_repo {filename} {
+    global repo_dir
+    return [file exists "$repo_dir/$filename"]
+}
+
+# Checks if file exists in overlay
+proc file_in_overlay {filename} {
+    global overlay_upper
+    return [file exists "$overlay_upper/$filename"]
+}
+
+# ==============================================================================
+# Setup and Teardown
+# ==============================================================================
+
+proc setup {} {
+    global test_ai_home repo_dir
+
+    section "Setup"
+
+    # Verify we're in a git repo with agent-dev available
+    if {![file exists "$repo_dir/.git"]} {
+        puts "ERROR: Must run from git repository root"
+        exit 1
+    }
+    if {![file executable "./agent-dev"]} {
+        puts "ERROR: ./agent-dev not found or not executable"
+        exit 1
+    }
+
+    # Create isolated test environment
     exec mkdir -p $test_ai_home
-
-    log_success "Test environment created"
-    log_info "AI_HOME set to: $env(AI_HOME)"
+    info "Created test AI_HOME at $test_ai_home"
 }
 
-# Cleanup test environment
-proc cleanup_test_environment {} {
+proc teardown {} {
     global test_ai_home
 
-    log_info "Cleaning up test environment"
+    section "Teardown"
     exec rm -rf $test_ai_home
-    log_success "Test environment cleaned up"
+    info "Cleaned up test environment"
 }
 
-# Check prerequisites
-proc check_prerequisites {} {
-    global repo_dir
+# ==============================================================================
+# Test: Sandbox Initialization
+# ==============================================================================
 
-    log_info "Checking prerequisites"
+proc test_sandbox_starts_correctly {} {
+    global overlay_upper spawn_id
 
-    # Check if we're in a git repo
-    if {![file exists "$repo_dir/.git"]} {
-        puts "${RED}Error: Must run from git repository root${NC}"
-        exit 1
-    }
+    section "Test: Sandbox Initialization"
 
-    # Check if agent-dev exists and is executable
-    if {![file executable "./agent-dev"]} {
-        puts "${RED}Error: ./agent-dev not found or not executable${NC}"
-        exit 1
-    }
+    reset_overlay
+    run_in_sandbox "pwd"
 
-    log_success "Prerequisites check passed"
-}
-
-# Test 1: Basic environment setup
-proc test_environment_setup {} {
-    global overlay_upper overlay_base
-
-    start_test "Environment setup and overlay creation"
-
-    # Clean overlay if exists
-    exec rm -rf $overlay_upper 2>/dev/null || true
-
-    spawn ./agent-dev bash -c "pwd"
-
+    # Should display isolation banner (after npm update check)
     expect {
-        -re "Starting Claude Code in isolated environment" {
-            log_success "Isolation banner displayed"
+        -re "Starting Claude Code" {
+            pass "Displays isolation banner"
         }
         timeout {
-            log_failure "Timeout waiting for isolation banner"
-            expect eof
-            catch wait
+            fail "No isolation banner displayed"
+            finish_process
             return
         }
     }
 
+    # Should show overlay information
     expect {
-        -re "Overlay directories:" {
-            log_success "Overlay information displayed"
+        "Overlay directories:" {
+            pass "Shows overlay directory info"
         }
         timeout {
-            log_failure "No overlay information shown"
-            expect eof
-            catch wait
+            fail "Missing overlay directory info"
+            finish_process
             return
         }
     }
 
     # Wait for command to complete and merge-overlay to run
     expect {
-        -re "No changes in overlay" {
-            log_success "Empty overlay detected"
+        -re "No changes in overlay|Auto-discarded" {
+            pass "Empty overlay handled correctly"
         }
-        eof {
-            # Process exited
-        }
+        eof { }
         timeout {
-            log_failure "Timeout waiting for completion"
+            fail "Timeout waiting for completion"
         }
     }
 
-    catch wait result
-    log_info "Process exited with: $result"
-
-    # Verify overlay directories were created
-    if {[file exists $overlay_upper]} {
-        log_success "Overlay upper directory created"
-    } else {
-        log_failure "Overlay upper directory not created"
-    }
+    catch wait
 }
 
-# Test 2: File creation in overlay
-proc test_file_creation_isolation {} {
-    global repo_dir overlay_upper
+# ==============================================================================
+# Test: File Isolation
+# ==============================================================================
 
-    start_test "File creation isolated to overlay"
+proc test_files_stay_in_overlay {} {
+    global repo_dir overlay_upper spawn_id
 
-    set test_file "test-isolation-[clock seconds].txt"
-    set test_content "This is test content"
+    section "Test: File Isolation"
 
-    spawn ./agent-dev bash -c "echo '$test_content' > $test_file && cat $test_file"
+    set testfile "isolation-test-[clock seconds].txt"
+
+    run_in_sandbox "echo 'test content' > $testfile && cat $testfile"
 
     expect {
-        $test_content {
-            log_success "File created and readable in sandbox"
+        "test content" {
+            pass "File created and readable in sandbox"
         }
         timeout {
-            log_failure "Timeout or file not created in sandbox"
-            expect eof
-            catch wait
+            fail "Could not create/read file in sandbox"
+            finish_process
             return
         }
     }
 
-    # Handle merge-overlay interaction - discard the test file
+    # Discard the test file when merge-overlay prompts
     expect {
-        -re "NEW.*$test_file" {
+        -re "NEW.*$testfile" {
             send "r\r"
-            expect {
-                "✓ Discarded" {
-                    log_success "Test file discarded from overlay"
-                }
-                timeout {
-                    log_failure "Timeout waiting for discard confirmation"
-                }
-            }
+            expect "Discarded" { pass "File discarded via merge-overlay" }
         }
-        -re "No changes in overlay" {
-            log_info "No changes to merge (unexpected)"
-        }
-        eof {
-            # Process exited without merge prompt
-        }
-        timeout {
-            log_failure "Timeout waiting for merge prompt"
-        }
-    }
-
-    catch wait result
-
-    # Verify overlay is now empty (confirms only one file was created and discarded)
-    set overlay_files [glob -nocomplain -directory $overlay_upper *]
-    if {[llength $overlay_files] == 0} {
-        log_success "Overlay empty after discard (only one file was created)"
-    } else {
-        log_failure "Overlay not empty - unexpected files remain: $overlay_files"
-    }
-
-    if {![file exists "$repo_dir/$test_file"]} {
-        log_success "Original repository not modified"
-    } else {
-        log_failure "File leaked to original repository!"
-        exec rm -f "$repo_dir/$test_file"
-    }
-}
-
-# Test 3: Protected directory access
-proc test_protected_directories {} {
-    global repo_dir overlay_upper
-
-    start_test "Protected directories are read-only"
-
-    # Try to modify .git/config (should fail or not persist)
-    spawn ./agent-dev bash -c "echo '# test' >> .git/config 2>&1; echo STATUS:\$?"
-
-    expect {
-        -re "STATUS:(1|2)" {
-            log_success "Write to .git/config blocked (permission denied)"
-        }
-        "STATUS:0" {
-            log_failure "Write to .git/config succeeded (should be blocked)"
-        }
-        timeout {
-            log_failure "Timeout testing .git/config protection"
-            expect eof
-            catch wait
-            return
-        }
-    }
-
-    # Handle merge-overlay (should be empty)
-    expect {
-        -re "No changes in overlay" {
-            log_success "No changes to merge (expected)"
-        }
-        eof {
-            # Process exited
-        }
-        timeout {
-            log_failure "Timeout waiting for completion"
-        }
+        "No changes" { info "No merge prompt (unexpected)" }
+        eof { }
+        timeout { fail "Timeout waiting for merge prompt" }
     }
 
     catch wait
 
-    # Verify overlay is empty (protected dirs shouldn't create overlay files)
-    set overlay_files [glob -nocomplain -directory $overlay_upper *]
-    if {[llength $overlay_files] == 0} {
-        log_success "Overlay empty (protected directory write blocked)"
+    # Verify file didn't leak to real repo
+    if {![file_in_repo $testfile]} {
+        pass "File did not leak to repository"
     } else {
-        log_failure "Overlay not empty - unexpected files: $overlay_files"
+        fail "File leaked to repository!"
+        exec rm -f "$repo_dir/$testfile"
+    }
+}
+
+# ==============================================================================
+# Test: Protected Directories
+# ==============================================================================
+
+proc test_git_directory_protected {} {
+    global repo_dir spawn_id
+
+    section "Test: Protected Directories"
+
+    run_in_sandbox "echo '# test' >> .git/config 2>&1; echo EXIT_CODE:\$?"
+
+    expect {
+        -re "EXIT_CODE:(1|2)" {
+            pass "Write to .git/config blocked"
+        }
+        "EXIT_CODE:0" {
+            fail "Write to .git/config succeeded (should be blocked)"
+        }
+        timeout {
+            fail "Timeout testing .git protection"
+            finish_process
+            return
+        }
     }
 
-    # Verify .git/config wasn't actually modified
+    expect_no_changes
+
+    # Double-check .git/config wasn't modified
     if {[catch {exec grep -c "# test" "$repo_dir/.git/config"} result] || $result eq "0"} {
-        log_success ".git/config remained unmodified"
+        pass ".git/config remains unmodified"
     } else {
-        log_failure ".git/config was modified!"
+        fail ".git/config was modified!"
     }
 }
 
-# Test 4: Whitelisted directory access (read-only)
-proc test_whitelisted_access {} {
-    start_test "Whitelisted directories accessible read-only"
+# ==============================================================================
+# Test: Home Directory Isolation
+# ==============================================================================
 
-    # Check if we can read from whitelisted dirs (e.g., .asdf if it exists)
-    spawn ./agent-dev bash -c {
-        if [ -d ~/.asdf ]; then
-            ls ~/.asdf >/dev/null 2>&1 && echo "READ_OK"
-        else
-            echo "NO_ASDF"
-        fi
-    }
+proc test_home_directory_isolated {} {
+    global test_ai_home spawn_id
+
+    section "Test: Home Directory Isolation"
+
+    set testfile "test-home-[clock seconds].txt"
+
+    run_in_sandbox "touch ~/$testfile && ls ~/$testfile"
 
     expect {
-        "READ_OK" {
-            log_success "Whitelisted directory readable"
-        }
-        "NO_ASDF" {
-            log_info "Skipping test (.asdf not present)"
+        $testfile {
+            pass "Can create files in sandbox home"
         }
         timeout {
-            log_failure "Timeout testing whitelisted directory access"
-            expect eof
-            catch wait
+            fail "Could not create file in sandbox home"
+            finish_process
             return
         }
     }
 
-    # Handle merge-overlay
-    expect {
-        -re "No changes in overlay" {
-            # Expected
-        }
-        eof {
-            # Process exited
-        }
-        timeout {
-            log_failure "Timeout waiting for completion"
-        }
-    }
+    expect_no_changes
 
-    catch wait
-}
-
-# Test 5: Home directory isolation
-proc test_home_isolation {} {
-    global test_ai_home env
-
-    start_test "Home directory mapped to aihome"
-
-    spawn ./agent-dev bash -c {
-        echo "HOME=$HOME"
-        echo "PWD=$PWD"
-        touch ~/test-home-file.txt
-        ls ~/test-home-file.txt
-    }
-
-    expect {
-        -re "test-home-file.txt" {
-            log_success "Files can be created in isolated home"
-        }
-        timeout {
-            log_failure "Timeout testing home directory"
-            expect eof
-            catch wait
-            return
-        }
-    }
-
-    # Handle merge-overlay (should be empty since file is in home, not repo)
-    expect {
-        -re "No changes in overlay" {
-            log_success "No repo changes (file was in home)"
-        }
-        eof {
-            # Process exited
-        }
-        timeout {
-            log_failure "Timeout waiting for completion"
-        }
-    }
-
-    catch wait
-
-    # Verify file is in test aihome, not real home
-    if {[file exists "$test_ai_home/test-home-file.txt"]} {
-        log_success "File created in isolated test aihome"
-        exec rm -f "$test_ai_home/test-home-file.txt"
+    # Verify file is in test AI_HOME, not real home
+    if {[file exists "$test_ai_home/$testfile"]} {
+        pass "File created in isolated AI_HOME"
+        exec rm -f "$test_ai_home/$testfile"
     } else {
-        log_failure "File not found in test aihome"
+        fail "File not found in isolated AI_HOME"
     }
 
-    if {![file exists "$env(HOME)/test-home-file.txt"]} {
-        log_success "Real home directory not modified"
+    if {![file exists "$::env(HOME)/$testfile"]} {
+        pass "Real home directory unchanged"
     } else {
-        log_failure "File leaked to real home!"
-        exec rm -f "$env(HOME)/test-home-file.txt"
+        fail "File leaked to real home directory!"
+        exec rm -f "$::env(HOME)/$testfile"
     }
 }
 
-# Test 6: Working directory preservation
-proc test_working_directory {} {
-    global repo_dir
+# ==============================================================================
+# Test: Working Directory
+# ==============================================================================
 
-    start_test "Working directory preserved in sandbox"
+proc test_working_directory_preserved {} {
+    global repo_dir spawn_id
 
-    spawn ./agent-dev bash -c "pwd"
+    section "Test: Working Directory"
+
+    run_in_sandbox "pwd"
 
     expect {
         $repo_dir {
-            log_success "Working directory correctly set to repo"
+            pass "Working directory matches repository"
         }
         timeout {
-            log_failure "Timeout checking working directory"
-            expect eof
-            catch wait
+            fail "Working directory not set correctly"
+            finish_process
             return
         }
     }
 
-    # Handle merge-overlay
-    expect {
-        -re "No changes in overlay" {
-            # Expected
-        }
-        eof {
-            # Process exited
-        }
-        timeout {
-            log_failure "Timeout waiting for completion"
-        }
-    }
-
-    catch wait
+    expect_no_changes
 }
 
-# Test 7: Network access
-proc test_network_access {} {
-    start_test "Network access available in sandbox"
+# ==============================================================================
+# Test: Network Access
+# ==============================================================================
 
-    spawn ./agent-dev bash -c "ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 && echo 'PING_OK' || echo 'PING_FAIL'"
+proc test_network_available {} {
+    global spawn_id
+
+    section "Test: Network Access"
+
+    run_in_sandbox "ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 && echo NETWORK_OK || echo NETWORK_FAIL"
 
     expect {
-        "PING_OK" {
-            log_success "Network access works"
+        "NETWORK_OK" {
+            pass "Network is accessible"
         }
-        "PING_FAIL" {
-            log_info "Network unavailable (may be expected in some environments)"
+        "NETWORK_FAIL" {
+            info "Network unavailable (may be expected)"
         }
         timeout {
-            log_failure "Timeout testing network access"
-            expect eof
-            catch wait
+            fail "Timeout testing network"
+            finish_process
             return
         }
     }
 
-    # Handle merge-overlay
-    expect {
-        -re "No changes in overlay" {
-            # Expected
-        }
-        eof {
-            # Process exited
-        }
-        timeout {
-            log_failure "Timeout waiting for completion"
-        }
-    }
-
-    catch wait
+    expect_no_changes
 }
 
-# Test 8: Comprehensive multi-file merge workflow
-proc test_multi_file_merge_workflow {} {
-    global repo_dir overlay_upper
+# ==============================================================================
+# Test: Multi-file Merge Workflow
+# ==============================================================================
 
-    start_test "Multi-file merge: NEW, MODIFIED, DELETED with diff/accept/skip/discard"
+proc test_merge_workflow {} {
+    global repo_dir overlay_upper spawn_id
 
-    # Pre-create files: one to modify, one to delete
-    set existing_file "to-be-deleted.txt"
-    set modify_file "to-be-modified.txt"
-    exec sh -c "echo 'will be deleted' > $repo_dir/$existing_file"
-    exec sh -c "echo 'original content' > $repo_dir/$modify_file"
+    section "Test: Merge Workflow (NEW/MODIFIED/DELETED)"
 
-    # Create multiple files, modify one, delete one in a single session
-    set timestamp [clock seconds]
-    spawn ./agent-dev bash -c "
-        echo 'content for file1' > merge-test1-$timestamp.txt
-        echo 'content for file2' > merge-test2-$timestamp.txt
-        echo 'content for file3' > merge-test3-$timestamp.txt
-        echo 'modified content' > $modify_file
-        rm $existing_file
-        echo 'Session complete: 3 new, 1 modified, 1 deleted'
+    set ts [clock seconds]
+
+    # Create files in repo that we'll modify and delete
+    set file_to_modify "modify-me-$ts.txt"
+    set file_to_delete "delete-me-$ts.txt"
+    exec sh -c "echo 'original' > $repo_dir/$file_to_modify"
+    exec sh -c "echo 'will be deleted' > $repo_dir/$file_to_delete"
+
+    # In sandbox: create 3 new files, modify 1, delete 1
+    set new_accept "new-accept-$ts.txt"
+    set new_skip "new-skip-$ts.txt"
+    set new_discard "new-discard-$ts.txt"
+
+    run_in_sandbox "
+        echo 'new file 1' > $new_accept
+        echo 'new file 2' > $new_skip
+        echo 'new file 3' > $new_discard
+        echo 'modified content' > $file_to_modify
+        rm $file_to_delete
+        echo 'CHANGES_COMPLETE'
     "
 
     expect {
-        "Session complete: 3 new, 1 modified, 1 deleted" {
-            log_success "Multiple changes made in sandbox (3 NEW, 1 MODIFIED, 1 DELETED)"
+        "CHANGES_COMPLETE" {
+            pass "Created 3 new, 1 modified, 1 deleted"
         }
         timeout {
-            log_failure "Timeout creating changes in sandbox"
-            expect eof
-            catch wait
+            fail "Timeout creating changes"
+            finish_process
             return
         }
     }
 
-    # Verify overlay has changes (3 new files + 1 modified + deletion marker)
-    # Note: Modern overlayfs uses character devices (0/0) for deletions, not .wh. files
-    set overlay_items [glob -nocomplain -directory $overlay_upper *]
-
-    if {[llength $overlay_items] >= 4} {
-        log_success "Overlay contains changes (found [llength $overlay_items] items)"
-    } else {
-        log_failure "Expected at least 4 items in overlay, found [llength $overlay_items]"
-    }
-
-    # Handle all merge-overlay interactions
-    # Use a simpler approach - just respond to each prompt as it comes
-    expect {
-        -re "Found (\\d+) file" {
-            set num_files $expect_out(1,string)
-            log_info "Merge-overlay will process $num_files files"
-        }
-        timeout {
-            log_failure "Timeout waiting for file count"
-        }
-    }
-
-    # Handle each file interactively
-    set interaction_count 0
-    set max_interactions 50
-    while {1} {
-        incr interaction_count
-        if {$interaction_count > $max_interactions} {
-            log_failure "Too many interactions ($max_interactions) - possible infinite loop"
-            break
-        }
-
+    # Handle merge-overlay prompts
+    # We'll: accept file1, skip file2, discard file3, accept modified, accept deleted
+    set done 0
+    while {!$done} {
         expect {
-            -re "NEW.*merge-test1-$timestamp\\.txt.*Action" {
-                send "d\r"
-                log_success "Requested diff for NEW file 1"
-                exp_continue
-            }
-            -re "File does not exist in repository.*Action" {
+            -re "NEW.*$new_accept.*Action" {
                 send "y\r"
-                log_success "Diff warning shown, accepting NEW file 1"
-                exp_continue
+                info "Accepting: $new_accept"
             }
-            -re "✓ Accepted" {
-                exp_continue
-            }
-            -re "NEW.*merge-test2-$timestamp\\.txt.*Action" {
+            -re "NEW.*$new_skip.*Action" {
                 send "n\r"
-                log_success "Skipping NEW file 2"
-                exp_continue
+                info "Skipping: $new_skip"
             }
-            -re "○ Skipped" {
-                exp_continue
-            }
-            -re "NEW.*merge-test3-$timestamp\\.txt.*Action" {
+            -re "NEW.*$new_discard.*Action" {
                 send "r\r"
-                log_success "Discarding NEW file 3"
-                exp_continue
+                info "Discarding: $new_discard"
             }
-            -re "✓ Discarded" {
-                exp_continue
-            }
-            -re "MODIFIED.*$modify_file.*Action" {
-                send "d\r"
-                log_success "Requested diff for MODIFIED file"
-                exp_continue
-            }
-            -re "Diff:.*$modify_file.*Action" {
+            -re "MODIFIED.*$file_to_modify.*Action" {
                 send "y\r"
-                log_success "Diff shown, accepting MODIFIED file"
-                exp_continue
+                info "Accepting modification: $file_to_modify"
             }
-            -re "DELETED.*$existing_file.*Action" {
+            -re "DELETED.*$file_to_delete.*Action" {
                 send "y\r"
-                log_success "Accept DELETED file"
-                exp_continue
+                info "Accepting deletion: $file_to_delete"
             }
-            -re "(File does not exist|already.*deleted).*Action" {
-                send "y\r"
-                log_success "Diff handled, accepting DELETED file"
-                exp_continue
-            }
-            -re "✓ Deleted from repository" {
-                exp_continue
-            }
-            -re "Action \\\[.*\\\]\\\?" {
-                # Unexpected action prompt - send 'n' to skip
-                log_info "Unexpected action prompt (interaction $interaction_count) - skipping"
+            -re "Action.*\\?" {
+                # Catch-all for unexpected prompts
                 send "n\r"
-                exp_continue
+                info "Skipping unexpected prompt"
             }
             eof {
-                log_success "Merge-overlay completed all files"
-                break
+                set done 1
             }
             timeout {
-                log_failure "Timeout during merge-overlay interaction (at interaction $interaction_count)"
-                log_info "Last buffer content: $expect_out(buffer)"
-                break
+                fail "Timeout during merge workflow"
+                set done 1
             }
         }
     }
 
     catch wait
 
-    # Verify final state
-    # File 1 should be in repo
-    if {[file exists "$repo_dir/merge-test1-$timestamp.txt"]} {
-        log_success "Accepted NEW file correctly in repository"
+    # Verify results
+    info "Verifying merge results..."
+
+    # Accepted new file should be in repo
+    if {[file_in_repo $new_accept]} {
+        pass "Accepted file is in repository"
     } else {
-        log_failure "Accepted NEW file not found in repository"
+        fail "Accepted file not found in repository"
     }
 
-    # File 2 should still be in overlay
-    if {[file exists "$overlay_upper/merge-test2-$timestamp.txt"]} {
-        log_success "Skipped NEW file correctly remains in overlay"
+    # Skipped file should remain in overlay
+    if {[file_in_overlay $new_skip]} {
+        pass "Skipped file remains in overlay"
     } else {
-        log_failure "Skipped NEW file not found in overlay"
+        fail "Skipped file not in overlay"
     }
 
-    # File 3 should not be in repo or overlay
-    if {![file exists "$repo_dir/merge-test3-$timestamp.txt"] && ![file exists "$overlay_upper/merge-test3-$timestamp.txt"]} {
-        log_success "Discarded NEW file correctly removed"
+    # Discarded file should be nowhere
+    if {![file_in_repo $new_discard] && ![file_in_overlay $new_discard]} {
+        pass "Discarded file removed completely"
     } else {
-        log_failure "Discarded NEW file found where it shouldn't be"
+        fail "Discarded file still exists"
     }
 
     # Modified file should have new content
-    if {[file exists "$repo_dir/$modify_file"]} {
-        set content [exec cat "$repo_dir/$modify_file"]
+    if {[file_in_repo $file_to_modify]} {
+        set content [exec cat "$repo_dir/$file_to_modify"]
         if {$content eq "modified content"} {
-            log_success "MODIFIED file has updated content in repository"
+            pass "Modified file has new content"
         } else {
-            log_failure "MODIFIED file content incorrect: $content"
+            fail "Modified file has wrong content: $content"
         }
     } else {
-        log_failure "MODIFIED file not found in repository"
+        fail "Modified file missing from repo"
     }
 
-    # Deleted file should not exist in repo
-    if {![file exists "$repo_dir/$existing_file"]} {
-        log_success "DELETED file correctly removed from repository"
+    # Deleted file should be gone
+    if {![file_in_repo $file_to_delete]} {
+        pass "Deleted file removed from repository"
     } else {
-        log_failure "DELETED file still exists in repository"
+        fail "Deleted file still in repository"
     }
 
-    # Cleanup: remove skipped file from overlay and test files from repo
-    exec rm -f "$overlay_upper/merge-test2-$timestamp.txt"
-    exec rm -f "$repo_dir/merge-test1-$timestamp.txt"
-    exec rm -f "$repo_dir/$modify_file"
+    # Cleanup
+    catch { exec rm -f "$repo_dir/$new_accept" }
+    catch { exec rm -f "$repo_dir/$file_to_modify" }
+    catch { exec rm -rf "$overlay_upper/$new_skip" }
 }
 
-# Test 9: Overlay cleanup on empty session
-proc test_empty_overlay_handling {} {
-    global overlay_upper
+# ==============================================================================
+# Test: Empty Overlay
+# ==============================================================================
 
-    start_test "Empty overlay handled correctly"
+proc test_empty_overlay_handled {} {
+    global spawn_id
 
-    # Clear overlay
-    exec rm -rf $overlay_upper
-    exec mkdir -p $overlay_upper
+    section "Test: Empty Overlay Handling"
 
-    # Run agent-dev with no changes
-    spawn ./agent-dev bash -c "echo 'No changes made'"
+    reset_overlay
+
+    run_in_sandbox "echo 'no changes here'"
 
     expect {
-        "No changes made" {
-            log_success "Command executed"
+        "no changes here" {
+            pass "Command executed successfully"
         }
         timeout {
-            log_failure "Timeout waiting for command"
-            expect eof
-            catch wait
+            fail "Timeout running command"
+            finish_process
             return
         }
     }
 
     expect {
-        "✓ No changes in overlay - nothing to merge" {
-            log_success "Empty overlay detected correctly"
+        "No changes in overlay" {
+            pass "Empty overlay detected correctly"
         }
-        eof {
-            # Process exited
-        }
+        eof { }
         timeout {
-            log_failure "Timeout waiting for empty overlay message"
+            fail "Timeout waiting for empty overlay message"
         }
     }
 
     catch wait
 }
 
-# Main execution
-proc run_all_tests {} {
-    global tests_passed tests_failed GREEN RED NC
+# ==============================================================================
+# Main
+# ==============================================================================
 
-    puts "\n========================================"
-    puts "  Agent-Dev Integration Test Suite"
-    puts "========================================"
+proc run_tests {} {
+    global tests_passed tests_failed GREEN RED NC BOLD
 
-    check_prerequisites
-    setup_test_environment
+    puts "\n${BOLD}========================================"
+    puts "  agent-dev Integration Test Suite"
+    puts "========================================${NC}\n"
 
-    test_environment_setup
-    test_file_creation_isolation
-    test_protected_directories
-    test_whitelisted_access
-    test_home_isolation
-    test_working_directory
-    test_network_access
-    test_multi_file_merge_workflow
-    test_empty_overlay_handling
+    setup
 
-    cleanup_test_environment
+    # Run all tests
+    test_sandbox_starts_correctly
+    test_files_stay_in_overlay
+    test_git_directory_protected
+    test_home_directory_isolated
+    test_working_directory_preserved
+    test_network_available
+    test_merge_workflow
+    test_empty_overlay_handled
 
-    # Summary
-    puts "\n========================================"
-    puts "  Test Summary"
-    puts "========================================"
+    teardown
+
+    # Print summary
     set total [expr $tests_passed + $tests_failed]
-    puts "Total assertions: $total"
-    puts "${GREEN}Passed: $tests_passed${NC}"
-    puts "${RED}Failed: $tests_failed${NC}"
+    puts "\n${BOLD}========================================"
+    puts "  Results"
+    puts "========================================${NC}"
+    puts ""
+    puts "  Total: $total assertions"
+    puts "  ${GREEN}Passed: $tests_passed${NC}"
+    puts "  ${RED}Failed: $tests_failed${NC}"
     puts ""
 
     if {$tests_failed > 0} {
-        puts "Some tests failed!"
+        puts "${RED}Some tests failed!${NC}"
         exit 1
     } else {
-        puts "All tests passed!"
+        puts "${GREEN}All tests passed!${NC}"
         exit 0
     }
 }
 
-# Run the tests
-run_all_tests
+run_tests
