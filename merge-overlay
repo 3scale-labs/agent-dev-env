@@ -62,9 +62,19 @@ get_file_status() {
   local repo_file="$2"
 
   # Check if it's a whiteout file (deletion marker in overlayfs)
+  # Old style: .wh. prefix
   if [[ "$(basename "$overlay_file")" =~ ^\.wh\. ]]; then
     echo "deleted"
     return
+  fi
+
+  # Modern overlayfs: character device with major/minor 0/0
+  if [[ -c "$overlay_file" ]]; then
+    local dev_info=$(stat -c "%t %T" "$overlay_file" 2>/dev/null || echo "")
+    if [[ "$dev_info" == "0 0" ]]; then
+      echo "deleted"
+      return
+    fi
   fi
 
   # Check if it's a directory
@@ -84,6 +94,14 @@ get_file_status() {
 # Get the original filename from whiteout marker
 get_whiteout_target() {
   local whiteout_file="$1"
+
+  # For character device whiteouts (modern overlayfs), filename is already correct
+  if [[ -c "$whiteout_file" ]]; then
+    echo "$whiteout_file"
+    return
+  fi
+
+  # For .wh. prefix whiteouts (old style), strip the prefix
   echo "$(dirname "$whiteout_file")/$(basename "$whiteout_file" | sed 's/^\.wh\.//')"
 }
 
@@ -261,15 +279,43 @@ echo "  N - Skip all remaining"
 echo ""
 
 # Find all files in overlay (including hidden files, excluding . and ..)
-# We need to handle whiteout files and regular files
+# We need to handle whiteout files (both .wh. prefix and char devices 0/0) and regular files
 FILES=()
 while IFS= read -r -d '' file; do
   rel_path="${file#$OVERLAY_UPPER/}"
   FILES+=("$rel_path")
-done < <(find "$OVERLAY_UPPER" -type f -print0 | sort -z)
+done < <(find "$OVERLAY_UPPER" \( -type f -o -type c \) -print0 | sort -z)
 
 TOTAL=${#FILES[@]}
 echo "Found $TOTAL file(s) to review"
+echo ""
+
+# List all files with their statuses
+echo "Files to review:"
+echo "----------------------------------------"
+for rel_path in "${FILES[@]}"; do
+  overlay_file="$OVERLAY_UPPER/$rel_path"
+  repo_file="$REPO_DIR/$rel_path"
+  status=$(get_file_status "$overlay_file" "$repo_file")
+
+  case "$status" in
+    deleted)
+      original_name=$(get_whiteout_target "$overlay_file")
+      original_rel_path="${original_name#$OVERLAY_UPPER/}"
+      echo -e "${RED}[DELETED]${NC} $original_rel_path"
+      ;;
+    modified)
+      echo -e "${YELLOW}[MODIFIED]${NC} $rel_path"
+      ;;
+    new)
+      echo -e "${BLUE}[NEW]${NC} $rel_path"
+      ;;
+    directory)
+      # Skip directories in the list
+      ;;
+  esac
+done
+echo "----------------------------------------"
 echo ""
 
 # Process each file
@@ -318,8 +364,8 @@ for rel_path in "${FILES[@]}"; do
     esac
   else
     # Interactive mode
-    process_file "$rel_path"
-    ret=$?
+    ret=0
+    process_file "$rel_path" || ret=$?
 
     case $ret in
       2)

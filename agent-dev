@@ -223,6 +223,7 @@ echo "💡 After session: merge-overlay will run automatically"
 echo "💡 To restore home: rm -rf $AI_HOME"
 echo ""
 
+exit_code=0
 bwrap \
   `# ===== System directories (read-only) =====` \
   --ro-bind /usr /usr \
@@ -302,7 +303,7 @@ bwrap \
   --unsetenv GPG_AGENT_INFO \
   \
   `# ===== Execute command (defaults to claude) =====` \
-  "${@:-claude}"
+  "${@:-claude}" || exit_code=$?
 
 # After bwrap exits, run merge-overlay to review changes
 echo ""
@@ -317,3 +318,5 @@ if [[ -n "$(ls -A "$OVERLAY_UPPER" 2>/dev/null)" ]]; then
 else
   echo "✓ No changes in overlay - nothing to merge"
 fi
+
+exit $exit_code

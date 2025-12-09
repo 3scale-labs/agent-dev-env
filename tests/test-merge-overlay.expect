@@ -75,6 +75,8 @@ proc cleanup_test_env {} {
 # Helper to create a file in overlay
 proc create_overlay_file {filename content} {
     global overlay_upper
+    set dir [file dirname "$overlay_upper/$filename"]
+    exec mkdir -p $dir
     exec sh -c "echo '$content' > $overlay_upper/$filename"
 }
 
@@ -84,6 +86,7 @@ proc create_whiteout {filename} {
     set dir [file dirname $filename]
     set base [file tail $filename]
     if {$dir eq "."} {
+        exec mkdir -p "$overlay_upper"
         exec touch "$overlay_upper/.wh.$base"
     } else {
         exec mkdir -p "$overlay_upper/$dir"
@@ -487,6 +490,109 @@ proc test_invalid_arguments {} {
     }
 }
 
+# Test 11: Verify file list display
+proc test_file_list_display {} {
+    global repo_dir overlay_upper
+
+    start_test "Verify file list is displayed before processing"
+
+    # Ensure files exist in repo for modified/deleted status
+    exec sh -c "echo 'original content' > $repo_dir/file1.txt"
+    exec sh -c "echo 'base content' > $repo_dir/file2.txt"
+
+    # Create multiple files with different statuses
+    create_overlay_file "new-file1.txt" "new content 1"
+    create_overlay_file "new-file2.txt" "new content 2"
+    create_overlay_file "file1.txt" "modified content"
+    create_whiteout "file2.txt"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    set list_shown 0
+    set delimiter_count 0
+    set saw_new_file1 0
+    set saw_new_file2 0
+    set saw_modified 0
+    set saw_deleted 0
+
+    # Wait for the Action prompt, then analyze what we received
+    expect {
+        -re {Action.*\?} {
+            # Got the prompt, now check the buffer
+            set output_buffer $expect_out(buffer)
+        }
+        timeout {
+            log_failure "Timeout waiting for file list and prompt"
+            return
+        }
+    }
+
+    # Now analyze the captured output
+    if {[regexp {Files to review:} $output_buffer]} {
+        set list_shown 1
+    }
+    if {[regexp -all -- {----------------------------------------} $output_buffer] >= 2} {
+        set delimiter_count 2
+    }
+    if {[regexp {NEW.*new-file1\.txt} $output_buffer]} {
+        set saw_new_file1 1
+    }
+    if {[regexp {NEW.*new-file2\.txt} $output_buffer]} {
+        set saw_new_file2 1
+    }
+    if {[regexp {MODIFIED.*file1\.txt} $output_buffer]} {
+        set saw_modified 1
+    }
+    if {[regexp {DELETED.*file2\.txt} $output_buffer]} {
+        set saw_deleted 1
+    }
+
+    # Now send the skip all command
+    send "N\r"
+    expect {
+        "→ Skipping all remaining files..." {
+            expect eof
+        }
+        timeout {
+            log_failure "Timeout waiting for skip all confirmation"
+            return
+        }
+    }
+
+    # Validate all elements were present
+    if {!$list_shown} {
+        log_failure "File list header not shown"
+        return
+    }
+
+    if {$delimiter_count < 2} {
+        log_failure "File list delimiters not shown (expected 2, got $delimiter_count)"
+        return
+    }
+
+    if {!$saw_new_file1} {
+        log_failure "new-file1.txt not shown in list"
+        return
+    }
+
+    if {!$saw_new_file2} {
+        log_failure "new-file2.txt not shown in list"
+        return
+    }
+
+    if {!$saw_modified} {
+        log_failure "file1.txt (modified) not shown in list"
+        return
+    }
+
+    if {!$saw_deleted} {
+        log_failure "file2.txt (deleted) not shown in list"
+        return
+    }
+
+    log_success "File list displayed correctly with all file statuses"
+}
+
 # Helper to clear overlay between tests
 proc clear_overlay {} {
     global overlay_upper
@@ -519,6 +625,8 @@ proc run_all_tests {} {
     test_accept_all
     clear_overlay
     test_discard_all
+    clear_overlay
+    test_file_list_display
     clear_overlay
     test_empty_overlay
     test_invalid_arguments
