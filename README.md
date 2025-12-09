@@ -13,6 +13,7 @@ There are existing attempts to sandbox agent processes, the most serious I find 
 
 # Usage
 
+* requires Bubblewrap 0.11+ for the overlayfs support
 * add the script(s) to your PATH
 * `mkdir -p ~/aihome`
 * agent-dev bash

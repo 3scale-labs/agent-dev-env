@@ -3,15 +3,20 @@
 #
 # Provides isolated environment with:
 # - ~/aihome mounted at your actual $HOME path (mostly writable)
-# - Current repo mounted at its original absolute path (read-write)
+# - Current repo mounted with overlayfs (changes isolated for review)
 # - All paths preserved to avoid hardcoded path issues
 # - No access to sensitive files (~/.ssh, ~/.aws, ~/.gnupg, etc.)
+#
+# Overlay security model:
+# - Repository changes are written to ~/aihome/.overlay/<repo-full-path>/upper
+# - Original repository remains untouched (read-only lower layer)
+# - After session, review and merge changes with: ./merge-overlay
 #
 # Setup:
 #   1. Create isolated home: mkdir -p ~/aihome
 #   2. Login to Claude in the sandbox:
 #      cd /path/to/your/repo
-#      claude-code-isolated bash
+#      ./agent-dev bash
 #      claude   # Follow login prompts
 #      exit
 #   3. (Optional) Disable auto-updates in isolated home:
@@ -20,9 +25,12 @@
 #
 # Usage:
 #   cd /path/to/your/repo
-#   claude-code-isolated           # Runs claude
-#   claude-code-isolated bash      # Inspect the environment
-#   claude-code-isolated vim file  # Run any command
+#   ./agent-dev                    # Runs claude
+#   ./agent-dev bash               # Inspect the environment
+#   ./agent-dev vim file           # Run any command
+#
+# After session - review changes:
+#   ./merge-overlay /path/to/repo ~/aihome/.overlay/path/to/repo/upper
 
 set -euo pipefail
 
@@ -30,7 +38,12 @@ set -euo pipefail
 AI_HOME="$HOME/aihome"
 REPO_DIR="$(pwd)"
 
-# ===== Protected paths in repository (read-only or tmpfs/devnull if non-existent) =====
+# Overlay directories for repository isolation (using full path to avoid conflicts)
+OVERLAY_BASE="$AI_HOME/.overlay$(realpath "$REPO_DIR")"
+OVERLAY_UPPER="$OVERLAY_BASE/upper"
+OVERLAY_WORK="$OVERLAY_BASE/work"
+
+# ===== Protected paths in repository (read-only if exist, defense-in-depth) =====
 PROTECTED_REPO_FILES=(
   ".git/config"
   ".git/info/exclude"  # Prevent sneaking ignore rules (not visible in git status)
@@ -50,7 +63,7 @@ PROTECTED_REPO_DIRS=(
   ".claude/agents"
 )
 
-# ===== Protected paths in agent home (read-only overlays on writable home) =====
+# ===== Protected paths in agent home (read-only if exist) =====
 PROTECTED_AGENT_HOME_FILES=(
   ".gitconfig"      # Safe config created during setup
   ".bashrc"
@@ -100,6 +113,9 @@ if [[ ! -d .git ]]; then
   exit 1
 fi
 
+# Create overlay directories for repository isolation
+mkdir -p "$OVERLAY_UPPER" "$OVERLAY_WORK"
+
 # Update Claude before entering sandbox (via npm, not trusting claude update)
 echo "🔄 Checking for Claude updates via npm..."
 npm update -g @anthropics/claude-code 2>&1 | grep -E "(changed|up to date)" || true
@@ -120,21 +136,13 @@ cat > "$CLAUDE_SETTINGS_TEMP" << 'EOF'
 }
 EOF
 
-# Cleanup function: remove mount point artifacts and temp files
-cleanup_protected_files() {
-  # Remove zero-length protected files (mount point artifacts)
-  for file in "${PROTECTED_REPO_FILES[@]}"; do
-    if [[ ! -s "$REPO_DIR/$file" ]]; then
-      rm -f "$REPO_DIR/$file"
-    fi
-  done
-
-  # Remove temp Claude settings
+# Cleanup function: remove temp files
+cleanup() {
   rm -f "$CLAUDE_SETTINGS_TEMP"
 }
 
 # Register cleanup on exit (handles normal exit, errors, and interrupts)
-trap cleanup_protected_files EXIT
+trap cleanup EXIT
 
 # Resolve DNS configuration (handles symlinks like /etc/resolv.conf -> /run/systemd/resolve/stub-resolv.conf)
 RESOLV_CONF_TARGET=$(readlink -f /etc/resolv.conf)
@@ -142,75 +150,62 @@ RESOLV_CONF_TARGET=$(readlink -f /etc/resolv.conf)
 # Build bwrap arguments for protected repo paths
 BWRAP_REPO_PROTECTIONS=()
 
-# Protected files: ro-bind if exists, bind /dev/null if not (prevents creation)
+# Protected files: ro-bind if exists (overlayfs will catch any creation attempts in upper)
 for file in "${PROTECTED_REPO_FILES[@]}"; do
   if [[ -f "$REPO_DIR/$file" ]]; then
     BWRAP_REPO_PROTECTIONS+=(--ro-bind "$REPO_DIR/$file" "$REPO_DIR/$file")
-  else
-    # Bind /dev/null to prevent malicious file creation (creates empty mount point)
-    BWRAP_REPO_PROTECTIONS+=(--ro-bind /dev/null "$REPO_DIR/$file")
   fi
 done
 
-# Protected directories: ro-bind if exists, tmpfs if not (prevents creation)
+# Protected directories: ro-bind if exists (overlayfs will catch any creation attempts in upper)
 for dir in "${PROTECTED_REPO_DIRS[@]}"; do
   if [[ -d "$REPO_DIR/$dir" ]]; then
     BWRAP_REPO_PROTECTIONS+=(--ro-bind "$REPO_DIR/$dir" "$REPO_DIR/$dir")
-  else
-    # Mount empty tmpfs to prevent malicious creation
-    BWRAP_REPO_PROTECTIONS+=(--tmpfs "$REPO_DIR/$dir")
   fi
 done
 
 # Build bwrap arguments for whitelisted real home paths
 BWRAP_HOME_WHITELIST=()
 
-# Whitelisted files from real home: ro-bind if exists, /dev/null if not
+# Whitelisted files from real home: ro-bind if exists
 for file in "${WHITELISTED_HOME_FILES[@]}"; do
   if [[ -f "$HOME/$file" ]]; then
     BWRAP_HOME_WHITELIST+=(--ro-bind "$HOME/$file" "$HOME/$file")
-  else
-    # Prevent creation in agent home
-    BWRAP_HOME_WHITELIST+=(--ro-bind /dev/null "$HOME/$file")
   fi
 done
 
-# Whitelisted directories from real home: ro-bind if exists, tmpfs if not
+# Whitelisted directories from real home: ro-bind if exists
 for dir in "${WHITELISTED_HOME_DIRS[@]}"; do
   if [[ -d "$HOME/$dir" ]]; then
     BWRAP_HOME_WHITELIST+=(--ro-bind "$HOME/$dir" "$HOME/$dir")
-  else
-    # Prevent persistent creation in agent home (writes go to RAM)
-    BWRAP_HOME_WHITELIST+=(--tmpfs "$HOME/$dir")
   fi
 done
 
 # Build bwrap arguments for protected agent home paths
 BWRAP_AGENT_HOME_PROTECTIONS=()
 
-# Protected files in agent home: ro-bind if exists, /dev/null if not
+# Protected files in agent home: ro-bind if exists
 for file in "${PROTECTED_AGENT_HOME_FILES[@]}"; do
   if [[ -f "$AI_HOME/$file" ]]; then
     BWRAP_AGENT_HOME_PROTECTIONS+=(--ro-bind "$AI_HOME/$file" "$HOME/$file")
-  else
-    # Prevent malicious creation for persistence attacks
-    BWRAP_AGENT_HOME_PROTECTIONS+=(--ro-bind /dev/null "$HOME/$file")
   fi
 done
 
-# Protected directories in agent home: ro-bind if exists, tmpfs if not
+# Protected directories in agent home: ro-bind if exists
 for dir in "${PROTECTED_AGENT_HOME_DIRS[@]}"; do
   if [[ -d "$AI_HOME/$dir" ]]; then
     BWRAP_AGENT_HOME_PROTECTIONS+=(--ro-bind "$AI_HOME/$dir" "$HOME/$dir")
-  else
-    # Prevent persistent creation for persistence attacks (writes go to RAM)
-    BWRAP_AGENT_HOME_PROTECTIONS+=(--tmpfs "$HOME/$dir")
   fi
 done
 
 echo "🔒 Starting Claude Code in isolated environment..."
 echo "   Home: $HOME → $AI_HOME (isolated, mostly writable)"
-echo "   Repo: $REPO_DIR (read-write, with protections)"
+echo "   Repo: $REPO_DIR (overlayfs - changes go to overlay)"
+echo ""
+echo "📂 Overlay directories:"
+echo "   Lower:  $REPO_DIR (original, read-only)"
+echo "   Upper:  $OVERLAY_UPPER"
+echo "   Work:   $OVERLAY_WORK"
 echo ""
 
 # Count protections by category
@@ -219,12 +214,13 @@ AGENT_HOME_PROTECTED=$((${#BWRAP_AGENT_HOME_PROTECTIONS[@]}))
 WHITELIST_COUNT=$((${#BWRAP_HOME_WHITELIST[@]}))
 
 echo "🛡️  Protection summary:"
-echo "   • Repo: $REPO_PROTECTED paths (ro-bind, tmpfs, or /dev/null)"
+echo "   • Repo: $REPO_PROTECTED existing paths (read-only)"
 echo "   • Agent home: $AGENT_HOME_PROTECTED config files (read-only)"
 echo "   • Real home: $WHITELIST_COUNT dev tools (read-only)"
 echo ""
-echo "💡 Non-existent paths use tmpfs/devnull to prevent creation"
-echo "💡 To restore: rm -rf $AI_HOME && re-run this script"
+echo "💡 All repo changes isolated in overlay (review with merge-overlay)"
+echo "💡 After session: merge-overlay will run automatically"
+echo "💡 To restore home: rm -rf $AI_HOME"
 echo ""
 
 bwrap \
@@ -267,14 +263,16 @@ bwrap \
   `# Dev tools and files from real home mounted read-only` \
   "${BWRAP_HOME_WHITELIST[@]}" \
   \
-  `# ===== Current repository at original path (read-write) =====` \
+  `# ===== Current repository with overlayfs (isolated writes) =====` \
+  `# Lower: original repo (read-only), Upper: changes go to overlay, Work: overlayfs internal` \
   `# If under $HOME, this overlays the aihome mount at this specific location` \
-  --bind "$REPO_DIR" "$REPO_DIR" \
+  --overlay-src "$REPO_DIR" \
+  --overlay "$OVERLAY_UPPER" "$OVERLAY_WORK" "$REPO_DIR" \
   --chdir "$REPO_DIR" \
   \
-  `# ===== Protected repo paths (read-only or tmpfs) =====` \
-  `# Files: ro-bind if exists, ignored if not` \
-  `# Dirs: ro-bind if exists, tmpfs if not (prevents malicious creation)` \
+  `# ===== Protected repo paths (read-only defense-in-depth) =====` \
+  `# Existing protected files/dirs are ro-bind (extra layer over overlayfs)` \
+  `# Non-existent paths can be created in overlay and rejected during merge` \
   "${BWRAP_REPO_PROTECTIONS[@]}" \
   \
   `# ===== Claude settings override (permissive, non-persistent) =====` \
@@ -305,3 +303,17 @@ bwrap \
   \
   `# ===== Execute command (defaults to claude) =====` \
   "${@:-claude}"
+
+# After bwrap exits, run merge-overlay to review changes
+echo ""
+echo "============================================"
+echo "  Session ended - reviewing changes"
+echo "============================================"
+echo ""
+
+# Check if there are any changes in overlay
+if [[ -n "$(ls -A "$OVERLAY_UPPER" 2>/dev/null)" ]]; then
+  merge-overlay "$REPO_DIR" "$OVERLAY_UPPER"
+else
+  echo "✓ No changes in overlay - nothing to merge"
+fi

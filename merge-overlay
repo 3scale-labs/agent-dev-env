@@ -1,0 +1,363 @@
+#!/bin/bash
+# merge-overlay: Interactive tool to review and merge overlayfs changes back to host
+#
+# Usage:
+#   merge-overlay <repo-dir> <overlay-upper-dir>
+#
+# Interactive commands:
+#   y - Accept current file (copy to host)
+#   r - Discard current file (remove from overlay)
+#   n - Reject but leave in overlay (skip for now)
+#   Y - Accept all remaining files
+#   R - Discard all remaining files
+#   N - Leave all remaining files in overlay (exit)
+#   d - Show diff with existing file (if file exists on host)
+
+set -euo pipefail
+
+# Check arguments
+if [[ $# -ne 2 ]]; then
+  echo "Usage: $0 <repo-dir> <overlay-upper-dir>"
+  echo ""
+  echo "Example: $0 /path/to/repo ~/aihome/.overlay/myrepo/upper"
+  exit 1
+fi
+
+REPO_DIR="$1"
+OVERLAY_UPPER="$2"
+
+# Validate directories
+if [[ ! -d "$REPO_DIR" ]]; then
+  echo "Error: Repository directory does not exist: $REPO_DIR"
+  exit 1
+fi
+
+if [[ ! -d "$OVERLAY_UPPER" ]]; then
+  echo "Error: Overlay upper directory does not exist: $OVERLAY_UPPER"
+  exit 1
+fi
+
+# Check if overlay is empty
+if [[ -z "$(ls -A "$OVERLAY_UPPER")" ]]; then
+  echo "✓ No changes in overlay - nothing to merge"
+  exit 0
+fi
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Track statistics
+ACCEPTED=0
+DISCARDED=0
+SKIPPED=0
+
+# Detect file status (new/modified/deleted)
+get_file_status() {
+  local overlay_file="$1"
+  local repo_file="$2"
+
+  # Check if it's a whiteout file (deletion marker in overlayfs)
+  if [[ "$(basename "$overlay_file")" =~ ^\\.wh\\. ]]; then
+    echo "deleted"
+    return
+  fi
+
+  # Check if it's a directory
+  if [[ -d "$overlay_file" ]]; then
+    echo "directory"
+    return
+  fi
+
+  # Check if file exists in repo
+  if [[ -f "$repo_file" ]]; then
+    echo "modified"
+  else
+    echo "new"
+  fi
+}
+
+# Get the original filename from whiteout marker
+get_whiteout_target() {
+  local whiteout_file="$1"
+  echo "$(dirname "$whiteout_file")/$(basename "$whiteout_file" | sed 's/^\.wh\.//')"
+}
+
+# Show diff between overlay and repo file
+show_diff() {
+  local overlay_file="$1"
+  local repo_file="$2"
+
+  if [[ -f "$repo_file" ]]; then
+    echo ""
+    echo "====== Diff: $repo_file ======"
+    diff -u "$repo_file" "$overlay_file" || true
+    echo "=============================="
+    echo ""
+  else
+    echo ""
+    echo "⚠️  File does not exist in repository (new file)"
+    echo ""
+  fi
+}
+
+# Process a single file
+process_file() {
+  local rel_path="$1"
+  local overlay_file="$OVERLAY_UPPER/$rel_path"
+  local repo_file="$REPO_DIR/$rel_path"
+  local status
+
+  # Get file status
+  status=$(get_file_status "$overlay_file" "$repo_file")
+
+  # Handle whiteout (deleted) files
+  if [[ "$status" == "deleted" ]]; then
+    local original_name=$(get_whiteout_target "$overlay_file")
+    local original_rel_path="${original_name#$OVERLAY_UPPER/}"
+    local original_repo_file="$REPO_DIR/$original_rel_path"
+
+    echo ""
+    echo -e "${RED}[DELETED]${NC} $original_rel_path"
+
+    while true; do
+      read -p "Action [y=accept delete, r=discard (keep file), n=skip, Y=accept all, R=discard all, N=skip all]? " choice
+      case "$choice" in
+        y)
+          if [[ -e "$original_repo_file" ]]; then
+            rm -f "$original_repo_file"
+            echo -e "${GREEN}✓${NC} Deleted from repository"
+          fi
+          rm -f "$overlay_file"
+          ((ACCEPTED++))
+          return 0
+          ;;
+        r)
+          rm -f "$overlay_file"
+          echo -e "${YELLOW}✓${NC} Discarded deletion (file kept in repo)"
+          ((DISCARDED++))
+          return 0
+          ;;
+        n)
+          echo -e "${CYAN}○${NC} Skipped"
+          ((SKIPPED++))
+          return 0
+          ;;
+        Y)
+          if [[ -e "$original_repo_file" ]]; then
+            rm -f "$original_repo_file"
+            echo -e "${GREEN}✓${NC} Deleted from repository"
+          fi
+          rm -f "$overlay_file"
+          ((ACCEPTED++))
+          return 2  # Signal accept all
+          ;;
+        R)
+          rm -f "$overlay_file"
+          echo -e "${YELLOW}✓${NC} Discarded deletion"
+          ((DISCARDED++))
+          return 3  # Signal discard all
+          ;;
+        N)
+          echo -e "${CYAN}○${NC} Skipped"
+          ((SKIPPED++))
+          return 4  # Signal skip all
+          ;;
+        *)
+          echo "Invalid choice. Please enter y, r, n, Y, R, or N"
+          ;;
+      esac
+    done
+  fi
+
+  # Skip directories (they're created automatically when files are copied)
+  if [[ "$status" == "directory" ]]; then
+    return 0
+  fi
+
+  # Handle regular files (new/modified)
+  local status_color="$BLUE"
+  local status_label="NEW"
+
+  if [[ "$status" == "modified" ]]; then
+    status_color="$YELLOW"
+    status_label="MODIFIED"
+  fi
+
+  echo ""
+  echo -e "${status_color}[$status_label]${NC} $rel_path"
+
+  while true; do
+    read -p "Action [y=accept, r=discard, n=skip, d=diff, Y=accept all, R=discard all, N=skip all]? " choice
+    case "$choice" in
+      y)
+        mkdir -p "$(dirname "$repo_file")"
+        cp -a "$overlay_file" "$repo_file"
+        echo -e "${GREEN}✓${NC} Accepted"
+        rm -f "$overlay_file"
+        ((ACCEPTED++))
+        return 0
+        ;;
+      r)
+        rm -f "$overlay_file"
+        echo -e "${YELLOW}✓${NC} Discarded"
+        ((DISCARDED++))
+        return 0
+        ;;
+      n)
+        echo -e "${CYAN}○${NC} Skipped"
+        ((SKIPPED++))
+        return 0
+        ;;
+      d)
+        show_diff "$overlay_file" "$repo_file"
+        ;;
+      Y)
+        mkdir -p "$(dirname "$repo_file")"
+        cp -a "$overlay_file" "$repo_file"
+        echo -e "${GREEN}✓${NC} Accepted"
+        rm -f "$overlay_file"
+        ((ACCEPTED++))
+        return 2  # Signal accept all
+        ;;
+      R)
+        rm -f "$overlay_file"
+        echo -e "${YELLOW}✓${NC} Discarded"
+        ((DISCARDED++))
+        return 3  # Signal discard all
+        ;;
+      N)
+        echo -e "${CYAN}○${NC} Skipped"
+        ((SKIPPED++))
+        return 4  # Signal skip all
+        ;;
+      *)
+        echo "Invalid choice. Please enter y, r, n, d, Y, R, or N"
+        ;;
+    esac
+  done
+}
+
+# Main merge loop
+echo "============================================"
+echo "  Overlay Merge Tool"
+echo "============================================"
+echo ""
+echo "Repository: $REPO_DIR"
+echo "Overlay:    $OVERLAY_UPPER"
+echo ""
+echo "Commands:"
+echo "  y - Accept current file"
+echo "  r - Discard current file"
+echo "  n - Skip (leave in overlay)"
+echo "  d - Show diff (files only)"
+echo "  Y - Accept all remaining"
+echo "  R - Discard all remaining"
+echo "  N - Skip all remaining"
+echo ""
+
+# Find all files in overlay (including hidden files, excluding . and ..)
+# We need to handle whiteout files and regular files
+FILES=()
+while IFS= read -r -d '' file; do
+  rel_path="${file#$OVERLAY_UPPER/}"
+  FILES+=("$rel_path")
+done < <(find "$OVERLAY_UPPER" -type f -print0 | sort -z)
+
+TOTAL=${#FILES[@]}
+echo "Found $TOTAL file(s) to review"
+echo ""
+
+# Process each file
+BATCH_MODE=""
+for rel_path in "${FILES[@]}"; do
+  overlay_file="$OVERLAY_UPPER/$rel_path"
+  repo_file="$REPO_DIR/$rel_path"
+
+  # Skip if file was already processed (e.g., by batch operations)
+  if [[ ! -e "$overlay_file" ]]; then
+    continue
+  fi
+
+  # If in batch mode, apply the same action
+  if [[ -n "$BATCH_MODE" ]]; then
+    status=$(get_file_status "$overlay_file" "$repo_file")
+
+    case "$BATCH_MODE" in
+      accept)
+        if [[ "$status" == "deleted" ]]; then
+          original_name=$(get_whiteout_target "$overlay_file")
+          original_rel_path="${original_name#$OVERLAY_UPPER/}"
+          original_repo_file="$REPO_DIR/$original_rel_path"
+          if [[ -e "$original_repo_file" ]]; then
+            rm -f "$original_repo_file"
+          fi
+          rm -f "$overlay_file"
+          echo -e "${GREEN}✓${NC} [DELETED] $original_rel_path"
+        elif [[ "$status" != "directory" ]]; then
+          mkdir -p "$(dirname "$repo_file")"
+          cp -a "$overlay_file" "$repo_file"
+          rm -f "$overlay_file"
+          echo -e "${GREEN}✓${NC} [$status] $rel_path"
+        fi
+        ((ACCEPTED++))
+        ;;
+      discard)
+        rm -f "$overlay_file"
+        echo -e "${YELLOW}✓${NC} [$status] $rel_path"
+        ((DISCARDED++))
+        ;;
+      skip)
+        echo -e "${CYAN}○${NC} [$status] $rel_path"
+        ((SKIPPED++))
+        ;;
+    esac
+  else
+    # Interactive mode
+    process_file "$rel_path"
+    ret=$?
+
+    case $ret in
+      2)
+        BATCH_MODE="accept"
+        echo ""
+        echo "→ Accepting all remaining files..."
+        ;;
+      3)
+        BATCH_MODE="discard"
+        echo ""
+        echo "→ Discarding all remaining files..."
+        ;;
+      4)
+        BATCH_MODE="skip"
+        echo ""
+        echo "→ Skipping all remaining files..."
+        ;;
+    esac
+  fi
+done
+
+# Clean up empty directories in overlay
+find "$OVERLAY_UPPER" -type d -empty -delete 2>/dev/null || true
+
+# Summary
+echo ""
+echo "============================================"
+echo "  Merge Complete"
+echo "============================================"
+echo -e "${GREEN}Accepted:${NC}  $ACCEPTED"
+echo -e "${YELLOW}Discarded:${NC} $DISCARDED"
+echo -e "${CYAN}Skipped:${NC}   $SKIPPED"
+echo ""
+
+if [[ $SKIPPED -gt 0 ]]; then
+  echo "⚠️  $SKIPPED file(s) remain in overlay"
+  echo "   Run this script again to review them"
+else
+  echo "✓ All files processed"
+fi
+echo ""
