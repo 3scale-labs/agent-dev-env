@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # merge-overlay: Interactive tool to review and merge overlayfs changes back to host
 #
 # Usage:
@@ -41,6 +41,50 @@ should_ignore() {
     esac
   done
   return 1
+}
+
+is_git_ignored() {
+  (cd "$REPO_DIR" && git check-ignore -q "$1") 2>/dev/null
+}
+
+GIT_IGNORED_CHOICE=""
+
+git_ignored_should_discard() {
+  local rel_path="$1"
+
+  # If user already chose to keep, skip checking (optimization)
+  [[ "$GIT_IGNORED_CHOICE" == "keep" ]] && return 1
+
+  # Check if file is git-ignored
+  is_git_ignored "$rel_path" || return 1
+
+  # If already chose to discard, return true
+  [[ "$GIT_IGNORED_CHOICE" == "discard" ]] && return 0
+
+  # First git-ignored file - ask user
+  echo ""
+  echo -e "${YELLOW}⚠ Git-ignored file detected:${NC} $rel_path"
+  echo ""
+  while true; do
+    read -p "How should git-ignored files be handled? [a/A=ask (review), D=discard all]? " choice
+    case "$choice" in
+      a|A)
+        echo "→ Git-ignored files will be treated like regular changes"
+        echo ""
+        GIT_IGNORED_CHOICE="keep"
+        return 1
+        ;;
+      D)
+        echo "→ All git-ignored files will be discarded"
+        echo ""
+        GIT_IGNORED_CHOICE="discard"
+        return 0
+        ;;
+      *)
+        echo "Invalid choice. Please enter a, A, or D"
+        ;;
+    esac
+  done
 }
 
 # Validate directories
@@ -130,7 +174,7 @@ show_diff() {
   if [[ -f "$repo_file" ]]; then
     echo ""
     echo "====== Diff: $repo_file ======"
-    diff -u "$repo_file" "$overlay_file" || true
+    diff -u --color=always "$repo_file" "$overlay_file" || true
     echo "=============================="
     echo ""
   else
@@ -299,16 +343,22 @@ echo ""
 # We need to handle whiteout files (both .wh. prefix and char devices 0/0) and regular files
 FILES=()
 IGNORED=()
-while IFS= read -r -d '' file; do
+GIT_IGNORED_COUNT=0
+
+# Read from fd 4 (connected to find output) so stdin remains available for user input
+while IFS= read -u 4 -r -d '' file; do
   rel_path="${file#$OVERLAY_UPPER/}"
   if should_ignore "$rel_path"; then
     IGNORED+=("$rel_path")
     # Auto-discard ignored files
     rm -f "$file"
+  elif git_ignored_should_discard "$rel_path"; then
+    rm -f "$file"
+    ((GIT_IGNORED_COUNT++))
   else
     FILES+=("$rel_path")
   fi
-done < <(find "$OVERLAY_UPPER" \( -type f -o -type c \) -print0 | sort -z)
+done 4< <(find "$OVERLAY_UPPER" \( -type f -o -type c \) -print0)
 
 # Report ignored files
 if [[ ${#IGNORED[@]} -gt 0 ]]; then
@@ -316,6 +366,12 @@ if [[ ${#IGNORED[@]} -gt 0 ]]; then
   for f in "${IGNORED[@]}"; do
     echo "  - $f"
   done
+  echo ""
+fi
+
+# Report git-ignored files that were discarded
+if [[ $GIT_IGNORED_COUNT -gt 0 ]]; then
+  echo "Discarded $GIT_IGNORED_COUNT git-ignored file(s)"
   echo ""
 fi
 

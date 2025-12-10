@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # claude-code-isolated: Secure bubblewrap wrapper for running commands in isolation
 #
 # Provides isolated environment with:

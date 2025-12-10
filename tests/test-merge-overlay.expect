@@ -593,10 +593,303 @@ proc test_file_list_display {} {
     log_success "File list displayed correctly with all file statuses"
 }
 
+# Helper to create .gitignore
+proc create_gitignore {patterns} {
+    global repo_dir
+    set f [open "$repo_dir/.gitignore" w]
+    foreach pattern $patterns {
+        puts $f $pattern
+    }
+    close $f
+}
+
 # Helper to clear overlay between tests
 proc clear_overlay {} {
-    global overlay_upper
-    exec sh -c "rm -rf $overlay_upper/* 2>/dev/null || true"
+    global overlay_upper repo_dir
+    exec sh -c "rm -rf $overlay_upper/* $overlay_upper/.* 2>/dev/null || true"
+    exec sh -c "rm -f $repo_dir/.gitignore 2>/dev/null || true"
+}
+
+# Test 12: Git-ignored files - discard all
+proc test_git_ignored_discard_all {} {
+    global repo_dir overlay_upper
+
+    start_test "Git-ignored files - discard all"
+
+    # Create .gitignore
+    create_gitignore [list "*.log" "build/" ".env"]
+
+    # Create git-ignored files in overlay
+    create_overlay_file "debug.log" "log content"
+    create_overlay_file "error.log" "error content"
+    create_overlay_file ".env" "secret=value"
+    # Also create a non-ignored file to ensure script continues
+    create_overlay_file "important.txt" "keep this"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    # Don't assume which git-ignored file appears first - just wait for any
+    expect {
+        -re {Git-ignored file detected:} {
+            expect {
+                -re {How should git-ignored files be handled.*\?} {
+                    send "D\r"
+                    expect {
+                        "→ All git-ignored files will be discarded" {
+                            # Should see "Discarded N git-ignored file(s)"
+                            expect {
+                                -re {Discarded ([0-9]+) git-ignored file} {
+                                    set count $expect_out(1,string)
+                                    if {$count == 3} {
+                                        log_success "Correct count of git-ignored files discarded"
+                                    } else {
+                                        log_failure "Wrong count: expected 3, got $count"
+                                    }
+
+                                    # Should still prompt for the non-ignored file
+                                    expect {
+                                        -re {NEW.*important\.txt} {
+                                            send "y\r"
+                                            expect {
+                                                "✓ Accepted" {
+                                                    expect eof
+
+                                                    # Verify git-ignored files were NOT copied
+                                                    set all_discarded 1
+                                                    foreach f {debug.log error.log .env} {
+                                                        if {[file exists "$repo_dir/$f"]} {
+                                                            set all_discarded 0
+                                                        }
+                                                    }
+
+                                                    if {$all_discarded} {
+                                                        log_success "All git-ignored files correctly not copied to repo"
+                                                    } else {
+                                                        log_failure "Some git-ignored files were incorrectly copied"
+                                                    }
+
+                                                    # Verify git-ignored files removed from overlay
+                                                    set all_removed 1
+                                                    foreach f {debug.log error.log .env} {
+                                                        if {[file exists "$overlay_upper/$f"]} {
+                                                            set all_removed 0
+                                                        }
+                                                    }
+
+                                                    if {$all_removed} {
+                                                        log_success "All git-ignored files removed from overlay"
+                                                    } else {
+                                                        log_failure "Some git-ignored files still in overlay"
+                                                    }
+
+                                                    # Verify non-ignored file was copied
+                                                    if {[file exists "$repo_dir/important.txt"]} {
+                                                        log_success "Non-ignored file was processed normally"
+                                                    } else {
+                                                        log_failure "Non-ignored file was not copied"
+                                                    }
+                                                }
+                                                timeout {
+                                                    log_failure "Timeout waiting for acceptance of non-ignored file"
+                                                }
+                                            }
+                                        }
+                                        timeout {
+                                            log_failure "Timeout waiting for non-ignored file prompt"
+                                        }
+                                    }
+                                }
+                                timeout {
+                                    log_failure "Timeout waiting for discard count message"
+                                }
+                            }
+                        }
+                        timeout {
+                            log_failure "Timeout waiting for discard confirmation"
+                        }
+                    }
+                }
+                timeout {
+                    log_failure "Timeout waiting for git-ignored prompt"
+                }
+            }
+        }
+        timeout {
+            log_failure "Timeout waiting for git-ignored file detection"
+        }
+    }
+}
+
+# Test 13: Git-ignored files - keep for review (ask mode)
+proc test_git_ignored_keep_for_review {} {
+    global repo_dir overlay_upper
+
+    start_test "Git-ignored files - keep for review"
+
+    # Create .gitignore
+    create_gitignore [list "*.tmp" "cache/"]
+
+    # Create git-ignored files
+    create_overlay_file "temp.tmp" "temp content"
+    create_overlay_file "data.tmp" "data content"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    # Wait for git-ignored file detection (don't assume which .tmp file is first)
+    expect -re {Git-ignored file detected:}
+    expect -re {How should git-ignored files be handled.*\?}
+    send "a\r"
+
+    # Wait for confirmation
+    expect "→ Git-ignored files will be treated like regular changes"
+
+    # Wait for file list
+    expect -re {Found [0-9]+ file}
+
+    # Process first file
+    expect -re {Action.*\?}
+    send "y\r"
+    expect "✓ Accepted"
+
+    # Process second file
+    expect -re {Action.*\?}
+    send "y\r"
+    expect "✓ Accepted"
+
+    # Wait for process to complete
+    catch {expect eof}
+
+    # Verify both files were copied
+    set both_copied 1
+    foreach f {temp.tmp data.tmp} {
+        if {![file exists "$repo_dir/$f"]} {
+            set both_copied 0
+        }
+    }
+
+    if {$both_copied} {
+        log_success "Git-ignored files kept and reviewed normally"
+    } else {
+        log_failure "Not all git-ignored files were copied"
+    }
+}
+
+# Test 14: Git-ignored files - uppercase A option
+proc test_git_ignored_keep_uppercase {} {
+    global repo_dir overlay_upper
+
+    start_test "Git-ignored files - uppercase A option"
+
+    # Create .gitignore
+    create_gitignore [list "*.bak"]
+
+    # Create git-ignored file
+    create_overlay_file "backup.bak" "backup content"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    expect {
+        -re {Git-ignored file detected:} {
+            expect {
+                -re {How should git-ignored files be handled.*\?} {
+                    send "A\r"
+                    expect {
+                        "→ Git-ignored files will be treated like regular changes" {
+                            # Wait for file list and action prompt
+                            expect {
+                                -re {Action.*\?} {
+                                    send "y\r"
+                                    expect {
+                                        "✓ Accepted" {
+                                            expect eof
+
+                                            if {[file exists "$repo_dir/backup.bak"]} {
+                                                log_success "Uppercase A option works correctly"
+                                            } else {
+                                                log_failure "File not copied with uppercase A"
+                                            }
+                                        }
+                                        timeout {
+                                            log_failure "Timeout waiting for acceptance"
+                                        }
+                                    }
+                                }
+                                timeout {
+                                    log_failure "Timeout waiting for file prompt"
+                                }
+                            }
+                        }
+                        timeout {
+                            log_failure "Timeout waiting for keep confirmation"
+                        }
+                    }
+                }
+                timeout {
+                    log_failure "Timeout waiting for git-ignored prompt"
+                }
+            }
+        }
+        timeout {
+            log_failure "Timeout waiting for git-ignored file detection"
+        }
+    }
+}
+
+# Test 15: Git-ignored files - invalid input handling
+proc test_git_ignored_invalid_input {} {
+    global repo_dir overlay_upper
+
+    start_test "Git-ignored files - invalid input handling"
+
+    # Create .gitignore
+    create_gitignore [list "*.ignore"]
+
+    # Create git-ignored file
+    create_overlay_file "test.ignore" "test content"
+
+    spawn ./merge-overlay $repo_dir $overlay_upper
+
+    expect {
+        -re {Git-ignored file detected:} {
+            expect {
+                -re {How should git-ignored files be handled.*\?} {
+                    # Try invalid input first
+                    send "x\r"
+                    expect {
+                        "Invalid choice. Please enter a, A, or D" {
+                            # Now send valid input
+                            expect {
+                                -re {How should git-ignored files be handled.*\?} {
+                                    send "D\r"
+                                    expect {
+                                        "→ All git-ignored files will be discarded" {
+                                            expect eof
+                                            log_success "Invalid input rejected and re-prompted correctly"
+                                        }
+                                        timeout {
+                                            log_failure "Timeout after valid input"
+                                        }
+                                    }
+                                }
+                                timeout {
+                                    log_failure "Timeout waiting for re-prompt"
+                                }
+                            }
+                        }
+                        timeout {
+                            log_failure "Timeout waiting for invalid input message"
+                        }
+                    }
+                }
+                timeout {
+                    log_failure "Timeout waiting for git-ignored prompt"
+                }
+            }
+        }
+        timeout {
+            log_failure "Timeout waiting for git-ignored file detection"
+        }
+    }
 }
 
 # Main test execution
@@ -627,6 +920,14 @@ proc run_all_tests {} {
     test_discard_all
     clear_overlay
     test_file_list_display
+    clear_overlay
+    test_git_ignored_discard_all
+    clear_overlay
+    test_git_ignored_keep_for_review
+    clear_overlay
+    test_git_ignored_keep_uppercase
+    clear_overlay
+    test_git_ignored_invalid_input
     clear_overlay
     test_empty_overlay
     test_invalid_arguments
