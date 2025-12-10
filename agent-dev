@@ -84,7 +84,7 @@ PROTECTED_AGENT_HOME_DIRS=(
 
 # ===== Whitelisted paths from real home (read-only mounts) =====
 WHITELISTED_HOME_FILES=(
-  # Add files from real home that should be readable (if any)
+  .tool-versions
 )
 
 WHITELISTED_HOME_DIRS=(
@@ -124,12 +124,22 @@ echo ""
 # Prepare Claude settings: create permissive default in temp file
 CLAUDE_SETTINGS_TEMP=$(mktemp)
 
+# https://code.claude.com/docs/en/settings
 cat > "$CLAUDE_SETTINGS_TEMP" << 'EOF'
 {
   "permissions": {
      "allow": [
        "Bash",
-       "WebSearch"
+       "WebSearch",
+       "WebFetch",
+       "Read",
+       "Write",
+       "Edit",
+       "Glob",
+       "Grep",
+       "Task",
+       "NotebookEdit",
+       "Skill"
      ]
   }
 }
