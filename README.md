@@ -53,3 +53,7 @@ sudo dnf install expect  # Fedora/RHEL
 ./tests/test-merge-overlay.expect  # Test the merge workflow
 ./tests/test-agent-dev.expect      # Test isolation and sandbox behavior
 ```
+
+# Credits
+
+* most of the code was Claude code generated
