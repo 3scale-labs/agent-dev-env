@@ -174,7 +174,7 @@ show_diff() {
   if [[ -f "$repo_file" ]]; then
     echo ""
     echo "====== Diff: $repo_file ======"
-    diff -u "$repo_file" "$overlay_file" || true
+    diff -u --color=always "$repo_file" "$overlay_file" || true
     echo "=============================="
     echo ""
   else
