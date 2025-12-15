@@ -15,6 +15,20 @@ There are existing attempts to sandbox agent processes, the most serious I find 
 * user's home directory is only proteccted by a list of blacklisted paths which leaves a lot of room for missing to secure your informantion
 * network isolation doesn't allow the process inside to connect to databases, the HTTP proxy only allows http connections, and not having access to your development databases makes it impossible to allow the sandboxed agent to test it's ramblings proprly
 
+# How it works
+
+* You designate a diretory path that will be the writable home directory of your AI agent inisde the sandbox (defaults to `~/aihome`)
+* it is mounted read-write at the same path as the original user's home inside the sandbox
+* current directory (your working repo usually) is mounted with overlayfs inside the sandbox at it's original path
+* the operating system important paths are mounted as read-only so you have access to all installed tools and libraries (`/lib`, `/etc`, `/usr`, etc.)
+* also `asdf`, `npm` and other directories from user's real home are monuted read-only inside the sandbox home so that you have access to these installations without ability to install, remove and modify them
+* note: *this means you need to install all necessary libraries from the host*
+* Finally, you are asked which files modified within the overlayfs should be merged back into your real repo directory (current dir).
+
+You must be highly careful especially when choosing files to merge after exiting the agent. i.e. about files that are potential threat outside the sanbox.
+
+A lesser but potentially important in some environments cocern is that a malware may persist itself inside the sandbox and use local resources or network access for malicious purposes. On signs of weird behavior, I'd suggest investigating and wiping the agent home dir to start over.
+
 # Usage
 
 * requires Bubblewrap 0.11+ for the overlayfs support
@@ -27,19 +41,6 @@ There are existing attempts to sandbox agent processes, the most serious I find 
 Now you can just call the script from within a git working tree and feel the false sense of security you came here for.
 
 **WARNING: Do not run multiple agent instances in the same repository simultaneously.** Each repository uses a single shared overlay directory (based on the repository path). Running multiple agents concurrently in the same repo will cause overlayfs conflicts and potential data corruption. You can safely run multiple agents in different repositories at the same time.
-
-# Implementation concerns
-
-* it operates on a selected directory `~/aihome` as the agent's writable home directory
-* which is mounted read-write at the same path as the original user's home
-* the directory you are calling the script from is mounted read-write inside the sandbox at it's original path
-* the operating system important paths are mounted as read-only so you have access to all installed tools and libraries
-* also `asdf`, `npm` and other directories from user's real home are monuted read-only inside the sandbox home so that you have access to these installations without ability to install, remove and modify them
-* note: *this means you need to install all necessary libraries from the host*
-
-The biggest concern I see is merging the changes after exiting the agent. One has to be careful with merging files that are a potential treat outside the sanbox.
-
-A lesser but potentially important in some environments is the cocern that a malware may set roots into the sandbox and use local resources or network access for malicious purposes. On signs of weird behavior, I'd suggest investigating and wiping the agent home dir to start over.
 
 ## Running Tests
 
