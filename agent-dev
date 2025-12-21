@@ -96,6 +96,7 @@ WHITELISTED_HOME_DIRS=(
   ".rustup"
   ".local"
   "bin"
+  "local"
 )
 
 # Validate environment
