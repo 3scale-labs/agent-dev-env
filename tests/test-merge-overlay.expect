@@ -7,6 +7,15 @@ set test_dir "/tmp/merge-overlay-test-[clock seconds]"
 set repo_dir "$test_dir/repo"
 set overlay_upper "$test_dir/overlay"
 
+# Global timeout handler - record failure but continue testing
+expect_before {
+    timeout {
+        global tests_failed
+        incr tests_failed
+        puts "\n\033\[0;31m✗ TIMEOUT:\033\[0m Expected pattern not found (test will likely fail)"
+    }
+}
+
 # Colors for output
 set GREEN "\033\[0;32m"
 set RED "\033\[0;31m"
@@ -55,10 +64,12 @@ proc setup_test_env {} {
 
     # Initialize git repo (merge-overlay checks for .git)
     exec sh -c "cd $repo_dir && git init >/dev/null 2>&1"
+    exec sh -c "cd $repo_dir && git config --local user.email 'test@example.com' && git config --local user.name 'Test User' && git config --local commit.gpgsign false"
 
-    # Create some base files in repo
+    # Create some base files in repo and commit them
     exec sh -c "echo 'original content' > $repo_dir/file1.txt"
     exec sh -c "echo 'base content' > $repo_dir/file2.txt"
+    exec sh -c "cd $repo_dir && git add file1.txt file2.txt && git commit -m 'Initial test files' >/dev/null 2>&1"
 
     log_success "Test environment created"
 }
@@ -496,6 +507,8 @@ proc test_file_list_display {} {
 
     start_test "Verify file list is displayed before processing"
 
+    clear_overlay
+
     # Ensure files exist in repo for modified/deleted status
     exec sh -c "echo 'original content' > $repo_dir/file1.txt"
     exec sh -c "echo 'base content' > $repo_dir/file2.txt"
@@ -607,7 +620,9 @@ proc create_gitignore {patterns} {
 proc clear_overlay {} {
     global overlay_upper repo_dir
     exec sh -c "rm -rf $overlay_upper/* $overlay_upper/.* 2>/dev/null || true"
-    exec sh -c "rm -f $repo_dir/.gitignore 2>/dev/null || true"
+    # Reset git state completely to initial commit
+    exec sh -c "cd $repo_dir && git reset --hard HEAD 2>/dev/null || true"
+    exec sh -c "cd $repo_dir && git clean -fdx 2>/dev/null || true"
 }
 
 # Test 12: Git-ignored files - discard all
@@ -749,12 +764,13 @@ proc test_git_ignored_keep_for_review {} {
     # Process first file
     expect -re {Action.*\?}
     send "y\r"
-    expect "✓ Accepted"
+    expect -re {Accepted}
 
     # Process second file
     expect -re {Action.*\?}
     send "y\r"
-    expect "✓ Accepted"
+    expect -re {Accepted}
+
 
     # Wait for process to complete
     catch {expect eof}

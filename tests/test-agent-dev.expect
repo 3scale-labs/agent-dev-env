@@ -30,6 +30,15 @@ set overlay_upper "$overlay_base/upper"
 # Export AI_HOME for spawned processes
 set env(AI_HOME) $test_ai_home
 
+# Global timeout handler - record failure but continue testing
+expect_before {
+    timeout {
+        global tests_failed
+        incr tests_failed
+        puts "\n\033\[0;31m✗ TIMEOUT:\033\[0m Expected pattern not found (test will likely fail)"
+    }
+}
+
 # ==============================================================================
 # Output Helpers
 # ==============================================================================
@@ -401,6 +410,8 @@ proc test_merge_workflow {} {
 
     section "Test: Merge Workflow (NEW/MODIFIED/DELETED)"
 
+    reset_overlay
+
     set ts [clock seconds]
 
     # Create files in repo that we'll modify and delete
@@ -522,7 +533,8 @@ proc test_merge_workflow {} {
     # Cleanup
     catch { exec rm -f "$repo_dir/$new_accept" }
     catch { exec rm -f "$repo_dir/$file_to_modify" }
-    catch { exec rm -rf "$overlay_upper/$new_skip" }
+    catch { exec rm -f "$overlay_upper/$new_skip" }
+    catch { exec rm -f "$overlay_upper/$new_discard" }
 }
 
 # ==============================================================================
