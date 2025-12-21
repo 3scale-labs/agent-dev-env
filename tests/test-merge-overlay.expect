@@ -633,7 +633,7 @@ proc test_git_ignored_discard_all {} {
         -re {Git-ignored file detected:} {
             expect {
                 -re {How should git-ignored files be handled.*\?} {
-                    send "D\r"
+                    send "R\r"
                     expect {
                         "→ All git-ignored files will be discarded" {
                             # Should see "Discarded N git-ignored file(s)"
@@ -860,7 +860,7 @@ proc test_git_ignored_invalid_input {} {
                             # Now send valid input
                             expect {
                                 -re {How should git-ignored files be handled.*\?} {
-                                    send "D\r"
+                                    send "R\r"
                                     expect {
                                         "→ All git-ignored files will be discarded" {
                                             expect eof

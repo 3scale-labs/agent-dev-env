@@ -353,8 +353,8 @@ while IFS= read -u 4 -r -d '' file; do
     # Auto-discard ignored files
     rm -f "$file"
   elif git_ignored_should_discard "$rel_path"; then
+    ((++GIT_IGNORED_COUNT)) # pre-increment to avoid returning non-zero status
     rm -f "$file"
-    ((GIT_IGNORED_COUNT++))
   else
     FILES+=("$rel_path")
   fi
