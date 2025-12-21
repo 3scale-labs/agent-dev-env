@@ -66,7 +66,7 @@ git_ignored_should_discard() {
   echo -e "${YELLOW}⚠ Git-ignored file detected:${NC} $rel_path"
   echo ""
   while true; do
-    read -p "How should git-ignored files be handled? [a/A=ask (review), D=discard all]? " choice
+    read -p "How should git-ignored files be handled? [a/A=ask (review), R=discard all]? " choice
     case "$choice" in
       a|A)
         echo "→ Git-ignored files will be treated like regular changes"
@@ -74,7 +74,7 @@ git_ignored_should_discard() {
         GIT_IGNORED_CHOICE="keep"
         return 1
         ;;
-      D)
+      R)
         echo "→ All git-ignored files will be discarded"
         echo ""
         GIT_IGNORED_CHOICE="discard"
