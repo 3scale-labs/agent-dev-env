@@ -7,6 +7,11 @@ set test_dir "/tmp/merge-overlay-test-[clock seconds]"
 set repo_dir "$test_dir/repo"
 set overlay_upper "$test_dir/overlay"
 
+# Reopen stdin from /dev/zero to prevent EOF from /dev/null
+# This fixes "bad file number" errors when expect_before detects stdin EOF
+close stdin
+open /dev/zero r
+
 # Global timeout handler - record failure but continue testing
 expect_before {
     timeout {
@@ -144,6 +149,10 @@ proc test_accept_new_file {} {
             log_failure "Timeout waiting for file prompt"
         }
     }
+
+    # Ensure spawn is fully cleaned up
+    catch { close }
+    catch { wait }
 }
 
 # Test 2: Discard a new file (r)
