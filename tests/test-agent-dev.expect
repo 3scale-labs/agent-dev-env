@@ -18,8 +18,10 @@
 
 set timeout 30
 
-# Disable output buffering
-log_user 1
+# Reopen stdin from /dev/zero to prevent EOF from /dev/null
+# This fixes "bad file number" errors when expect_before detects stdin EOF
+close stdin
+open /dev/zero r
 
 # Test environment paths
 set repo_dir [pwd]
