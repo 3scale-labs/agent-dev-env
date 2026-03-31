@@ -190,6 +190,7 @@ process_file() {
   local overlay_file="$OVERLAY_UPPER/$rel_path"
   local repo_file="$REPO_DIR/$rel_path"
   local status
+  local choice="$BATCH_MODE"
 
   # Get file status
   status=$(get_file_status "$overlay_file" "$repo_file")
@@ -204,7 +205,7 @@ process_file() {
     echo -e "${RED}[DELETED]${NC} $original_rel_path"
 
     while true; do
-      read -p "Action [y=accept delete, r=discard (keep file), n=skip, Y=accept all, R=discard all, N=skip all]? " choice
+      [ -n "$choice" ] || read -p "Action [y=accept delete, r=discard (keep file), n=skip, Y=accept all, R=discard all, N=skip all]? " choice
       case "$choice" in
         y)
           if [[ -e "$original_repo_file" ]]; then
@@ -250,6 +251,7 @@ process_file() {
           echo "Invalid choice. Please enter y, r, n, Y, R, or N"
           ;;
       esac
+      choice=""
     done
   fi
 
@@ -268,10 +270,17 @@ process_file() {
   fi
 
   echo ""
-  echo -e "${status_color}[$status_label]${NC} $rel_path"
+
+  if cmp -s "$overlay_file" "$repo_file"; then
+    printf "${status_color}[NOT$status_label]${NC} $rel_path\n"
+    rm -f "$overlay_file"
+    return 0
+  else
+    printf "${status_color}[$status_label]${NC} $rel_path\n"
+  fi
 
   while true; do
-    read -p "Action [y=accept, r=discard, n=skip, d=diff, Y=accept all, R=discard all, N=skip all]? " choice
+    [ -n "$choice" ] || read -p "Action [y=accept, r=discard, n=skip, d=diff, Y=accept all, R=discard all, N=skip all]? " choice
     case "$choice" in
       y)
         mkdir -p "$(dirname "$repo_file")"
@@ -318,6 +327,7 @@ process_file() {
         echo "Invalid choice. Please enter y, r, n, d, Y, R, or N"
         ;;
     esac
+    choice=""
   done
 }
 
@@ -422,67 +432,31 @@ for rel_path in "${FILES[@]}"; do
   overlay_file="$OVERLAY_UPPER/$rel_path"
   repo_file="$REPO_DIR/$rel_path"
 
-  # Skip if file was already processed (e.g., by batch operations)
-  if [[ ! -e "$overlay_file" ]]; then
+  # Skip if file was already pro
+  if [ ! -e "$overlay_file" ]; then
     continue
   fi
 
-  # If in batch mode, apply the same action
-  if [[ -n "$BATCH_MODE" ]]; then
-    status=$(get_file_status "$overlay_file" "$repo_file")
+  ret=0
+  process_file "$rel_path" || ret=$?
 
-    case "$BATCH_MODE" in
-      accept)
-        if [[ "$status" == "deleted" ]]; then
-          original_name=$(get_whiteout_target "$overlay_file")
-          original_rel_path="${original_name#$OVERLAY_UPPER/}"
-          original_repo_file="$REPO_DIR/$original_rel_path"
-          if [[ -e "$original_repo_file" ]]; then
-            rm -f "$original_repo_file"
-          fi
-          rm -f "$overlay_file"
-          echo -e "${GREEN}✓${NC} [DELETED] $original_rel_path"
-        elif [[ "$status" != "directory" ]]; then
-          mkdir -p "$(dirname "$repo_file")"
-          cp -a "$overlay_file" "$repo_file"
-          rm -f "$overlay_file"
-          echo -e "${GREEN}✓${NC} [$status] $rel_path"
-        fi
-        ((ACCEPTED++))
-        ;;
-      discard)
-        rm -f "$overlay_file"
-        echo -e "${YELLOW}✓${NC} [$status] $rel_path"
-        ((DISCARDED++))
-        ;;
-      skip)
-        echo -e "${CYAN}○${NC} [$status] $rel_path"
-        ((SKIPPED++))
-        ;;
-    esac
-  else
-    # Interactive mode
-    ret=0
-    process_file "$rel_path" || ret=$?
-
-    case $ret in
-      2)
-        BATCH_MODE="accept"
-        echo ""
-        echo "→ Accepting all remaining files..."
-        ;;
-      3)
-        BATCH_MODE="discard"
-        echo ""
-        echo "→ Discarding all remaining files..."
-        ;;
-      4)
-        BATCH_MODE="skip"
-        echo ""
-        echo "→ Skipping all remaining files..."
-        ;;
-    esac
-  fi
+  case $ret in
+    2)
+      BATCH_MODE="y"
+      echo ""
+      echo "→ Accepting all remaining files..."
+      ;;
+    3)
+      BATCH_MODE="r"
+      echo ""
+      echo "→ Discarding all remaining files..."
+      ;;
+    4)
+      BATCH_MODE="n"
+      echo ""
+      echo "→ Skipping all remaining files..."
+      ;;
+  esac
 done
 
 # Clean up empty directories in overlay
