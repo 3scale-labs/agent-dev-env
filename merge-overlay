@@ -209,7 +209,7 @@ process_file() {
       case "$choice" in
         y)
           if [[ -e "$original_repo_file" ]]; then
-            rm -f "$original_repo_file"
+            rm -rfv "$original_repo_file"
             echo -e "${GREEN}✓${NC} Deleted from repository"
           fi
           rm -f "$overlay_file"
