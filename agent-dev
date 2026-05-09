@@ -118,9 +118,9 @@ fi
 mkdir -p "$OVERLAY_UPPER" "$OVERLAY_WORK"
 
 # Update Claude before entering sandbox (via npm, not trusting claude update)
-echo "🔄 Checking for Claude updates via npm..."
-npm update -g @anthropics/claude-code 2>&1 | grep -E "(changed|up to date)" || true
-echo ""
+# echo "🔄 Checking for Claude and Qwen updates via npm..."
+# npm update -g @anthropics/claude-code @qwen-code/qwen-code 2>&1 | grep -E "(changed|up to date)" || true
+# echo ""
 
 # Prepare Claude settings: create permissive default in temp file
 CLAUDE_SETTINGS_TEMP=$(mktemp)
