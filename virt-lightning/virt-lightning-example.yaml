@@ -1,0 +1,151 @@
+- name: porta-dev-agent
+  distro: fedora-43
+  memory: 8192
+  vcpus: 4
+  root_disk_size: 30
+  username: bob
+  runcmd:
+    - dnf install -y git gh jq tmux ripgrep
+    - curl -L "https://github.com/asdf-vm/asdf/releases/download/v0.19.0/asdf-v0.19.0-linux-amd64.tar.gz" | tar xvz -C /usr/local/bin
+
+    - mkdir ~bob/.bashrc.d
+    - chown bob ~bob/.bashrc.d
+    - echo 'export ASDF_DATA_DIR=~/.asdf' >> ~bob/.bashrc.d/asdf.sh
+    - echo 'export PATH="$ASDF_DATA_DIR/shims:$PATH"' >> ~bob/.bashrc.d/asdf.sh
+    - echo '. <(asdf completion bash)' >> ~bob/.bashrc.d/asdf.sh
+    - |+
+      # install needed infra for the ai agent
+      sudo -u bob -i <<'EOF'
+        asdf plugin add nodejs
+        asdf install nodejs 24.15.0
+        echo "nodejs 24.15.0" > ~/.tool-versions
+      EOF
+
+    # obtain BOBSHELL_API_KEY from https://bob.ibm.com/admin/apikeys
+    - echo "BOBSHELL_API_KEY=my-bob-api-key" >> /etc/environment
+    - mkdir /etc/bobshell
+    - echo '{"context":{"fileFiltering":{"respectGitIgnore":false,"respectBobIgnore":false}}}' > /etc/bobshell/settings.json
+    # - echo '{ "model": { "name": "pro-latest" } }' > /etc/bobshell/system-defaults.json
+    - |+
+      sudo -u bob -i <<'EOF'
+        curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash
+      EOF
+    # needed for interactive, -p usage is fine without these below
+    - |
+      echo '{ "/home/bob": "TRUST_FOLDER" }' > ~/.bob/trustedFolders.json
+    - "bob --accept-license -p hello || :"
+
+    - |+
+      cat > ~/.tmux.conf <<"EOF"
+      setw -g mouse on
+      bind-key m set -g mouse \; display-message "Mouse: #{?mouse,on,off}"
+      EOF
+
+    - |+
+      cat > ~bob/AGENTS.md <<"EOF"
+      * Be direct, blunt, and concise. Prioritize accuracy over politeness.
+      * If a solution is speculative, briefly note it (e.g., "Speculative: ..."), but also suggest complex more risky solutions.
+      * This is a virtual machine and you have `sudo` access. Use it to
+      ** install machine global software
+      ** change machine configuration
+      ** prefer local user config anf installation for project specific stuff
+      ** avoid installing viruses and malware but report if you detect such
+      ** avoid breaking the machine beyond repair but also not a big problem so report if this happens
+      * Be autonomous and put effort before asking the user back.
+      ** run tests
+      ** install missing software or different version
+      ** be persistent in trying to solve problems
+      ** spawn sub-agents to complete distinct tasks to keep your context clean
+      * look for existing projects in user home dir and clone them if missing
+      * use gh if it was configured for github interactions
+      EOF
+
+    # Claude Code VERTEX setup (setup locally and use ready file content below)
+    - echo "CLAUDE_CODE_USE_VERTEX=1" >> /etc/environment
+    - echo "CLOUD_ML_REGION=global" >> /etc/environment
+    - echo "ANTHROPIC_VERTEX_PROJECT_ID=SET_YOUR_PROJECT" >> /etc/environment
+    - |+
+      # https://docs.cloud.google.com/sdk/docs/install-sdk
+      cat > /etc/yum.repos.d/google-cloud-sdk.repo <<"EOF"
+      [google-cloud-cli]
+      name=Google Cloud CLI
+      baseurl=https://packages.cloud.google.com/yum/repos/cloud-sdk-el10-x86_64
+      enabled=1
+      gpgcheck=1
+      repo_gpgcheck=0
+      gpgkey=https://packages.cloud.google.com/yum/doc/rpm-package-key-v10.gpg
+      EOF
+    - sudo dnf install -y google-cloud-cli
+    - gcloud config set core/disable_prompts true
+    - |+
+      sudo -u bob -i <<'EOB'
+
+      mkdir -p ~/.config/gcloud/configurations/
+
+      cat > ~/.config/gcloud/configurations/config_default <<"EOF"
+      [core]
+      account = SET_YOUR_USERNAME@redhat.com
+      project = SET_YOUR_PROJECT
+      EOF
+
+      cat > ~/.config/gcloud/application_default_credentials.json <<"EOF"
+      {
+        "account": "",
+        "client_id": "REDACTED"
+        "client_secret": "REDACTED",
+        "quota_project_id": "SET_QUOTA_PROJECT",
+        "refresh_token": "REDACTED",
+        "type": "authorized_user",
+        "universe_domain": "googleapis.com"
+      }
+      EOF
+
+      cd /tmp
+      curl -fsSL https://claude.ai/install.sh -o claude-install.sh
+      chmod +x claude-install.sh
+      ./claude-install.sh
+
+      mkdir -p ~/.claude
+      ln -s ~/AGENTS.md ~/.claude/CLAUDE.md
+      cat > ~/.claude/settings.json <<"EOF"
+      {
+        "permissions": {
+           "allow": [
+             "Bash",
+             "WebSearch",
+             "WebFetch",
+             "Read",
+             "Write",
+             "Edit",
+             "Glob",
+             "Grep",
+             "Task",
+             "NotebookEdit",
+             "Skill"
+           ]
+        }
+      }
+      EOF
+
+      EOB
+
+    # Github cli setup
+    - echo "GITHUB_APP_ID=TODO" >> /etc/environment
+    - echo "GITHUB_INSTALLATION_ID=TODO" >> /etc/environment
+    - echo "GITHUB_APP_KEY=/home/bob/.config/github-bot.pem" >> /etc/environment
+    - |+
+      sudo -u bob -i <<'EOB'
+      mkdir -p bin
+
+      cat > ~/.config/github-bot.pem <<"EOPEM"
+      -----BEGIN RSA PRIVATE KEY-----
+      ...
+      -----END RSA PRIVATE KEY-----
+      EOPEM
+
+      cat > ~/bin/gh <<"EOGH"
+      TTTTOOOODDDDOOOO
+      EOGH
+
+      chmod 755 ~/bin/gh
+      EOB
