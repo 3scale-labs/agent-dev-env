@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---- CONFIG ----
+APP_ID="${GITHUB_APP_ID:?}"
+INSTALLATION_ID="${GITHUB_INSTALLATION_ID:?}"
+KEY_PATH="${GITHUB_APP_KEY:?}"
+
+CACHE_FILE="${HOME}/.cache/gh-app-token.json"
+mkdir -p "$(dirname "$CACHE_FILE")"
+
+NOW=$(date +%s)
+
+find_real_gh() {
+    local self first second
+
+    self=$(readlink -f -- "${BASH_SOURCE[0]}")
+
+    {
+        IFS= read -r first
+        IFS= read -r second
+    } < <(which -a gh 2>/dev/null)
+
+    if [[ -z "$first" ]]; then
+        printf 'Error: no "gh" executable found in PATH.\n' >&2
+        return 1
+    fi
+
+    # If this script is not the first gh in PATH, use the first one.
+    if [[ "$self" != "$(readlink -f -- "$first")" ]]; then
+        printf '%s\n' "$first"
+        return 0
+    fi
+
+    # If this script is the first gh in PATH, use the second one.
+    if [[ -z "$second" ]]; then
+        printf 'Error: this wrapper is the first "gh" in PATH, but no second "gh" executable was found.\n' >&2
+        return 1
+    fi
+
+    printf '%s\n' "$second"
+}
+
+# ---- STEP 1: reuse cached token ----
+if [[ -f "$CACHE_FILE" ]]; then
+    EXP=$(jq -r '.expires_at_epoch // 0' "$CACHE_FILE")
+    if [[ "$EXP" -gt "$NOW" ]]; then
+        TOKEN=$(jq -r '.token' "$CACHE_FILE")
+        export GH_TOKEN="$TOKEN"
+        exec "$(find_real_gh)" "$@"
+    fi
+fi
+
+# ---- STEP 2: generate JWT (only on miss) ----
+HEADER_B64=$(printf '{"alg":"RS256","typ":"JWT"}' \
+  | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+IAT=$((NOW - 60))
+EXP=$((NOW + 540))
+
+PAYLOAD=$(printf '{"iat":%d,"exp":%d,"iss":%d}' "$IAT" "$EXP" "$APP_ID")
+PAYLOAD_B64=$(printf '%s' "$PAYLOAD" \
+  | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+UNSIGNED="${HEADER_B64}.${PAYLOAD_B64}"
+
+SIG=$(printf '%s' "$UNSIGNED" \
+  | openssl dgst -sha256 -sign "$KEY_PATH" \
+  | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+JWT="${UNSIGNED}.${SIG}"
+
+# ---- STEP 3: exchange JWT for installation token ----
+RESP=$(curl -fsS -X POST \
+  -H "Authorization: Bearer $JWT" \
+  -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/app/installations/${INSTALLATION_ID}/access_tokens")
+
+TOKEN=$(jq -r '.token' <<<"$RESP")
+EXPIRES_AT=$(jq -r '.expires_at' <<<"$RESP")
+
+if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
+    echo "Failed to obtain installation token" >&2
+    echo "$RESP" >&2
+    exit 1
+fi
+
+# ---- STEP 4: convert expiry ----
+# EXP_EPOCH=$(date -d "$EXPIRES_AT" +%s 2>/dev/null || gdate -d "$EXPIRES_AT" +%s)
+# SAFE_EXP=$((EXP_EPOCH - 60))
+# Instead of parsing ISO8601 (not portable), assume ~1h life and refresh early
+SAFE_EXP=$((NOW + 3500))
+
+# ---- STEP 5: write cache securely ----
+TMP=$(mktemp)
+
+jq -n \
+  --arg token "$TOKEN" \
+  --argjson expires_at_epoch "$SAFE_EXP" \
+  '{token: $token, expires_at_epoch: $expires_at_epoch}' > "$TMP"
+
+chmod 600 "$TMP"
+mv "$TMP" "$CACHE_FILE"
+
+# ---- STEP 6: exec gh ----
+export GH_TOKEN="$TOKEN"
+exec "$(find_real_gh)" "$@"
