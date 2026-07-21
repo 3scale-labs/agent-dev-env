@@ -447,6 +447,12 @@ proc test_merge_workflow {} {
         }
     }
 
+    # Consume the file listing preview so its [NEW]/[MODIFIED]/[DELETED]
+    # entries don't confuse the interactive prompt matching below.
+    # (Tcl's "." matches \n, so "NEW.*name.*Action" can span listing → prompt.)
+    expect -- "----------------------------------------"
+    expect -- "----------------------------------------"
+
     # Handle merge-overlay prompts
     # We'll: accept file1, skip file2, discard file3, accept modified, accept deleted
     set done 0
