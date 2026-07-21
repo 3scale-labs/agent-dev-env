@@ -148,3 +148,15 @@ jobs:
         echo "Linting bash scripts..."
         shellcheck agent-dev merge-overlay || true
         echo "Note: Some warnings may be acceptable for this use case"
+
+  validate-yaml:
+    name: Validate YAML Configuration
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+
+    - name: Validate YAML syntax
+      run: |
+        python3 -c "import yaml; yaml.safe_load(open('virt-lightning/virt-lightning-example.yaml'))"
