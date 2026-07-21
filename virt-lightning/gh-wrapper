@@ -47,7 +47,7 @@ if [[ -f "$CACHE_FILE" ]]; then
     if [[ "$EXP" -gt "$NOW" ]]; then
         TOKEN=$(jq -r '.token' "$CACHE_FILE")
         export GH_TOKEN="$TOKEN"
-	exec "$(find_real_gh)" "$@"
+        exec "$(find_real_gh)" "$@"
     fi
 fi
 

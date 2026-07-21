@@ -36,29 +36,12 @@
     - "bob --accept-license -p hello || :"
 
     - |+
-      cat > ~/.tmux.conf <<"EOF"
+      cat > ~bob/.tmux.conf <<"EOF"
       setw -g mouse on
       bind-key m set -g mouse \; display-message "Mouse: #{?mouse,on,off}"
       EOF
 
-    - |+
-      cat > ~bob/AGENTS.md <<"EOF"
-      * Be direct, blunt, and concise. Prioritize accuracy over politeness.
-      * If a solution is speculative, briefly note it (e.g., "Speculative: ..."), but also suggest complex more risky solutions.
-      * This is a virtual machine and you have `sudo` access. Use it to
-      ** install machine global software
-      ** change machine configuration
-      ** prefer local user config anf installation for project specific stuff
-      ** avoid installing viruses and malware but report if you detect such
-      ** avoid breaking the machine beyond repair but also not a big problem so report if this happens
-      * Be autonomous and put effort before asking the user back.
-      ** run tests
-      ** install missing software or different version
-      ** be persistent in trying to solve problems
-      ** spawn sub-agents to complete distinct tasks to keep your context clean
-      * look for existing projects in user home dir and clone them if missing
-      * use gh if it was configured for github interactions
-      EOF
+    - curl -sSL -o ~bob/AGENTS.md 'https://raw.githubusercontent.com/3scale-labs/agent-dev-env/refs/heads/main/virt-lightning/AGENTS.md'
 
     # Claude Code VERTEX setup (setup locally and use ready file content below)
     - echo "CLAUDE_CODE_USE_VERTEX=1" >> /etc/environment
@@ -143,9 +126,14 @@
       -----END RSA PRIVATE KEY-----
       EOPEM
 
-      cat > ~/bin/gh <<"EOGH"
-      TTTTOOOODDDDOOOO
-      EOGH
+      curl -sSL -o ~/bin/gh 'https://raw.githubusercontent.com/3scale-labs/agent-dev-env/refs/heads/main/virt-lightning/gh-wrapper'
 
       chmod 755 ~/bin/gh
+      gh auth setup-git
       EOB
+
+    # Atlasian CLI
+    - yum install -y yum-utils
+    - yum-config-manager --add-repo https://acli.atlassian.com/linux/rpm/acli.repo
+    - yum install -y acli
+    - sudo -u bob -- acli jira auth login --site "mysite.atlassian.net" --email "user@atlassian.com" --token <<< MY_JIRA_TOKEN
