@@ -5,6 +5,13 @@
   root_disk_size: 30
   username: bob
   runcmd:
+    - mkdir -p ~/.config/containers/registries.conf.d
+    - |+
+      cat > ~/.config/containers/registries.conf.d/00-shortnames.conf << 'EOF'
+      short-name-mode = "permissive"
+      unqualified-search-registries = ["docker.io"]
+      EOF
+
     - dnf install -y git gh jq tmux ripgrep
     - curl -L "https://github.com/asdf-vm/asdf/releases/download/v0.19.0/asdf-v0.19.0-linux-amd64.tar.gz" | tar xvz -C /usr/local/bin
 
@@ -24,7 +31,7 @@
     # obtain BOBSHELL_API_KEY from https://bob.ibm.com/admin/apikeys
     - echo "BOBSHELL_API_KEY=my-bob-api-key" >> /etc/environment
     - mkdir /etc/bobshell
-    - echo '{"context":{"fileFiltering":{"respectGitIgnore":false,"respectBobIgnore":false}}}' > /etc/bobshell/settings.json
+    - echo '{"context":{"fileFiltering":{"respectGitIgnore":false,"respectBobIgnore":false}},"session":{"maxTurns": 100000}}' > /etc/bobshell/settings.json
     # - echo '{ "model": { "name": "pro-latest" } }' > /etc/bobshell/system-defaults.json
     - |+
       sudo -u bob -i <<'EOF'
@@ -130,6 +137,7 @@
 
       chmod 755 ~/bin/gh
       gh auth setup-git
+      sed -ie 's#!/usr/bin/gh#!gh#' ~/.gitconfig
       EOB
 
     # Atlasian CLI

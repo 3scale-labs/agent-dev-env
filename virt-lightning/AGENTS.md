@@ -14,4 +14,5 @@
 ** be persistent in trying to solve problems
 ** spawn sub-agents to complete distinct tasks to keep your context clean
 * look for existing projects in user home dir and clone them if missing
-* use `gh` cli if it was configured for github interactions
+* use `gh` cli if configured for github interactions
+* use `acli` cli if configured for JIRA interactions
